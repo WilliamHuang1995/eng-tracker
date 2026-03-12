@@ -77,7 +77,10 @@ async function resolveTeamMembers(org, teamSlug) {
 function categorizePR(pr) {
   const title = (pr.title || '').toLowerCase();
   const labels = (pr.labels || []).map(l => l.name.toLowerCase());
-  const ccMatch = title.match(/^(\w+)(\(.+?\))?!?:/);
+  // Strip optional issue-tracker prefixes like "[XFCOP-5188]: " or "(TICKET-123): "
+  // before trying to match a conventional-commit prefix.
+  const stripped = title.replace(/^[\[(][\w-]+[\])]\s*:?\s*/, '');
+  const ccMatch = stripped.match(/^(\w+)(\(.+?\))?!?:/);
   const cc = ccMatch?.[1];
   const hasLabel = (...kws) => labels.some(l => kws.some(k => l.includes(k)));
 

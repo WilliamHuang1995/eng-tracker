@@ -483,9 +483,11 @@
               <th onclick="sortBy('prsSubmitted')">PRs Total</th>
               <th onclick="sortBy('weeklyPRAvg')">PRs / Week</th>
               <th onclick="sortBy('mergedPRs')">Merged</th>
+              <th>PR Types</th>
               <th onclick="sortBy('avgPRSize')">Avg PR Size</th>
               <th onclick="sortBy('avgFilesChanged')">Avg Files</th>
-              <th onclick="sortBy('totalChurn')">Total Churn</th>
+              <th>Lines ±</th>
+              <th onclick="sortBy('churnScore')" title="% of files you authored that were modified by another person within 30 days of your merge">Churn Score ⓘ</th>
               <th onclick="sortBy('avgMergeTimeHours')">Avg Merge Time</th>
               <th onclick="sortBy('minMergeTimeHours')">Fastest Merge</th>
               <th onclick="sortBy('commentsOnOthers')">Comments on Others</th>
@@ -523,14 +525,14 @@
       </div>
     </div>
 
-    <!-- Charts row 3: code churn -->
+    <!-- Charts row 3: PR types + churn score -->
     <div class="charts-grid">
       <div class="chart-card">
-        <h3>Code Churn — Additions vs Deletions</h3>
+        <h3>PR Type Distribution</h3>
         <div class="chart-wrap"><canvas id="chartChurn"></canvas></div>
       </div>
       <div class="chart-card">
-        <h3>Avg Files Changed per PR</h3>
+        <h3>Churn Score — % of authored files reworked by others within 30 days</h3>
         <div class="chart-wrap"><canvas id="chartFiles"></canvas></div>
       </div>
     </div>
@@ -643,6 +645,34 @@ function silentHtml(total, silent) {
       </div>
       <span style="color:var(--muted);font-size:11px">${pct}%</span>
     </div>`;
+}
+
+const TYPE_COLORS = {
+  feat:  { bg: 'rgba(88,166,255,0.18)',  fg: '#58a6ff' },
+  fix:   { bg: 'rgba(248,81,73,0.18)',   fg: '#f85149' },
+  perf:  { bg: 'rgba(188,140,255,0.18)', fg: '#bc8cff' },
+  test:  { bg: 'rgba(63,185,80,0.18)',   fg: '#3fb950' },
+  chore: { bg: 'rgba(139,148,158,0.18)', fg: '#8b949e' },
+  other: { bg: 'rgba(210,153,34,0.18)',  fg: '#d29922' },
+};
+
+function prTypesBadges(prsByType) {
+  if (!prsByType) return '<span class="na">—</span>';
+  const parts = Object.entries(prsByType)
+    .filter(([, v]) => v > 0)
+    .map(([type, count]) => {
+      const c = TYPE_COLORS[type] || TYPE_COLORS.other;
+      return `<span style="display:inline-block;padding:1px 6px;border-radius:8px;` +
+             `font-size:10px;font-weight:700;background:${c.bg};color:${c.fg};` +
+             `margin:1px 2px 1px 0">${type} ${count}</span>`;
+    });
+  return parts.length ? parts.join('') : '<span class="na">—</span>';
+}
+
+function churnScoreBadge(score) {
+  if (score === null || score === undefined) return '<span class="na">—</span>';
+  const cls = score < 10 ? 'badge-green' : score < 30 ? 'badge-yellow' : 'badge-red';
+  return `<span class="badge ${cls}">${score}%</span>`;
 }
 
 const PALETTE = [
@@ -830,9 +860,11 @@ function renderTable(stats) {
       <td><strong>${u.prsSubmitted}</strong></td>
       <td>${weeklyPRBadge(u.weeklyPRAvg)}</td>
       <td>${u.mergedPRs}</td>
+      <td style="white-space:normal;min-width:130px">${prTypesBadges(u.prsByType)}</td>
       <td>${prSizeBadge(u.avgPRSize)}</td>
       <td>${u.avgFilesChanged ?? '<span class="na">—</span>'}</td>
       <td><span style="color:var(--muted);font-size:12px">+${formatLines(u.totalAdditions)} / -${formatLines(u.totalDeletions)}</span></td>
+      <td>${churnScoreBadge(u.churnScore)}</td>
       <td>${mergeBadgeHtml(u.avgMergeTimeHours)}</td>
       <td>${u.minMergeTimeHours !== null ? `<span style="color:var(--green)">${formatHours(u.minMergeTimeHours)}</span>` : '<span class="na">—</span>'}</td>
       <td><strong>${u.commentsOnOthers}</strong></td>
@@ -844,7 +876,10 @@ function renderTable(stats) {
 
   // Update sort indicators
   const cols = ['login','prsSubmitted','weeklyPRAvg','mergedPRs',
-                 'avgPRSize','avgFilesChanged','totalChurn',
+                 null,             // PR Types — non-sortable
+                 'avgPRSize','avgFilesChanged',
+                 null,             // Lines ± — non-sortable display
+                 'churnScore',
                  'avgMergeTimeHours','minMergeTimeHours',
                  'commentsOnOthers','weeklyCommentAvg',
                  'approvalsTotal','approvalsWithoutComments'];
@@ -987,29 +1022,28 @@ function renderCharts(stats, meta) {
     },
   });
 
-  // 5. Code Churn — stacked: additions (green) + deletions (red)
+  // 5. PR Type Distribution — stacked horizontal bar per engineer
+  const typeOrder       = ['feat', 'fix', 'perf', 'test', 'chore', 'other'];
+  const typeChartColors = {
+    feat:  { bg: '#58a6ff55', border: '#58a6ff' },
+    fix:   { bg: '#f8514955', border: '#f85149' },
+    perf:  { bg: '#bc8cff55', border: '#bc8cff' },
+    test:  { bg: '#3fb95055', border: '#3fb950' },
+    chore: { bg: '#8b949e55', border: '#8b949e' },
+    other: { bg: '#d2992255', border: '#d29922' },
+  };
   charts.churn = new Chart(document.getElementById('chartChurn'), {
     type: 'bar',
     data: {
       labels,
-      datasets: [
-        {
-          label: 'Additions',
-          data: stats.map(s => s.totalAdditions),
-          backgroundColor: '#3fb95066',
-          borderColor: '#3fb950',
-          borderWidth: 1,
-          borderRadius: 4,
-        },
-        {
-          label: 'Deletions',
-          data: stats.map(s => s.totalDeletions),
-          backgroundColor: '#f8514966',
-          borderColor: '#f85149',
-          borderWidth: 1,
-          borderRadius: 4,
-        },
-      ],
+      datasets: typeOrder.map(type => ({
+        label: type,
+        data: stats.map(s => s.prsByType?.[type] || 0),
+        backgroundColor: typeChartColors[type].bg,
+        borderColor:     typeChartColors[type].border,
+        borderWidth: 1,
+        borderRadius: 4,
+      })),
     },
     options: {
       indexAxis: 'y',
@@ -1019,26 +1053,31 @@ function renderCharts(stats, meta) {
         legend: { display: true, labels: { color: '#8b949e', font: { size: 12 }, boxWidth: 12 } },
       },
       scales: {
-        x: { stacked: true, grid: { color: '#30363d' }, ticks: { color: '#8b949e' } },
+        x: { stacked: true, grid: { color: '#30363d' }, ticks: { color: '#8b949e', stepSize: 1 } },
         y: { stacked: true, grid: { display: false }, ticks: { color: '#c9d1d9', font: { size: 12 } } },
       },
     },
   });
 
-  // 6. Avg Files Changed per PR
+  // 6. Churn Score — % of files authored reworked by another person within 30 days
+  // Green < 10 %, Yellow 10–30 %, Red > 30 %
   charts.files = new Chart(document.getElementById('chartFiles'), {
     type: 'bar',
     data: {
       labels,
       datasets: [{
-        data: stats.map(s => s.avgFilesChanged),
-        backgroundColor: '#bc8cff55',
-        borderColor: '#bc8cff',
+        data: stats.map(s => s.churnScore ?? 0),
+        backgroundColor: stats.map(s =>
+          (s.churnScore ?? 0) < 10 ? '#3fb95055' :
+          (s.churnScore ?? 0) < 30 ? '#d2992255' : '#f8514955'),
+        borderColor: stats.map(s =>
+          (s.churnScore ?? 0) < 10 ? '#3fb950' :
+          (s.churnScore ?? 0) < 30 ? '#d29922' : '#f85149'),
         borderWidth: 1,
         borderRadius: 4,
       }],
     },
-    options: barOptions(),
+    options: barOptions({ tooltipFn: ctx => `${ctx.raw}%` }),
   });
 
   // 7. Weekly PR Trend (line) — top 6 contributors by total PRs

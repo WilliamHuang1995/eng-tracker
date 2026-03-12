@@ -72,6 +72,69 @@ async function resolveTeamMembers(org, teamSlug) {
   return members;
 }
 
+// Categorise a PR by type using conventional-commit prefix and GitHub labels.
+// Priority: feat > fix > perf > test > chore > other
+function categorizePR(pr) {
+  const title = (pr.title || '').toLowerCase();
+  const labels = (pr.labels || []).map(l => l.name.toLowerCase());
+  const ccMatch = title.match(/^(\w+)(\(.+?\))?!?:/);
+  const cc = ccMatch?.[1];
+  const hasLabel = (...kws) => labels.some(l => kws.some(k => l.includes(k)));
+
+  if (['feat', 'feature', 'add'].includes(cc) || hasLabel('feature', 'enhancement')) return 'feat';
+  if (['fix', 'bugfix', 'hotfix', 'bug'].includes(cc) || hasLabel('bug', 'fix', 'hotfix')) return 'fix';
+  if (['perf', 'refactor', 'optimize'].includes(cc) || hasLabel('performance', 'refactor')) return 'perf';
+  if (['test', 'tests', 'spec'].includes(cc) || hasLabel('test', 'testing')) return 'test';
+  if (['chore', 'docs', 'style', 'ci', 'build', 'deps', 'release', 'revert', 'infra'].includes(cc) ||
+      hasLabel('chore', 'docs', 'ci', 'build', 'release', 'dependencies')) return 'chore';
+
+  // No conventional-commit prefix — fall back to keyword scan
+  if (!cc) {
+    if (/\b(implement|new feature)\b/.test(title) || title.startsWith('add ')) return 'feat';
+    if (/\b(fix|bug|patch|repair)\b/.test(title)) return 'fix';
+    if (/\b(refactor|optimiz|perf)\b/.test(title)) return 'perf';
+    if (/\b(test|spec|coverage)\b/.test(title)) return 'test';
+    if (/\b(chore|docs|clean|upgrade|release|revert)\b/.test(title)) return 'chore';
+  }
+  return 'other';
+}
+
+// Real churn: files YOU authored that a *different* author modifies within windowDays.
+// mergedPRs = [{ mergedAt: string, author: string (lower), files: Set<string> }]
+function computeChurnData(mergedPRs, windowDays = 30) {
+  // Work in chronological order so the inner j-loop can break early
+  const sorted = [...mergedPRs].sort((a, b) => new Date(a.mergedAt) - new Date(b.mergedAt));
+  const result = new Map(); // login → { churnedFiles: Set, totalFiles: Set }
+
+  const ensure = author => {
+    if (!result.has(author)) result.set(author, { churnedFiles: new Set(), totalFiles: new Set() });
+    return result.get(author);
+  };
+
+  for (let i = 0; i < sorted.length; i++) {
+    const prA   = sorted[i];
+    const timeA = new Date(prA.mergedAt).getTime();
+    const dataA = ensure(prA.author);
+
+    // Register all files authored by A in this PR
+    for (const f of prA.files) dataA.totalFiles.add(f);
+
+    // Scan subsequent PRs within the churn window
+    for (let j = i + 1; j < sorted.length; j++) {
+      const prB     = sorted[j];
+      const diffDays = (new Date(prB.mergedAt).getTime() - timeA) / 86400000;
+      if (diffDays > windowDays) break;         // sorted → safe to stop
+      if (prB.author === prA.author) continue;  // self-edits excluded
+
+      // Any file overlap = churn for A
+      for (const f of prB.files) {
+        if (prA.files.has(f)) dataA.churnedFiles.add(f);
+      }
+    }
+  }
+  return result;
+}
+
 app.get('/api/resolve-team', async (req, res) => {
   const { team } = req.query;
   if (!team || !team.includes('/')) {
@@ -158,7 +221,8 @@ app.get('/api/stats', async (req, res) => {
 
     console.log(`Processing ${allPRs.length} PRs total...`);
 
-    const userStats = new Map();
+    const userStats        = new Map();
+    const mergedPRsForChurn = []; // for the file-level churn pass after the main loop
 
     const getUser = (login, avatarUrl) => {
       if (!userStats.has(login)) {
@@ -172,10 +236,12 @@ app.get('/api/stats', async (req, res) => {
           weeklyComments: {},
           approvalsTotal: 0,
           approvalsWithoutComments: 0,
-          // Code churn
+          // Code size (raw lines per PR)
           totalAdditions: 0,
           totalDeletions: 0,
           totalFilesChanged: 0,
+          // PR type breakdown (conventional-commit / label heuristic)
+          prsByType: { feat: 0, fix: 0, perf: 0, test: 0, chore: 0, other: 0 },
         });
       }
       return userStats.get(login);
@@ -191,6 +257,7 @@ app.get('/api/stats', async (req, res) => {
 
       const user = getUser(author, pr.user.avatar_url);
       user.prsSubmitted++;
+      user.prsByType[categorizePR(pr)]++;
 
       const wk = getWeekStart(pr.created_at);
       user.weeklyPRs[wk] = (user.weeklyPRs[wk] || 0) + 1;
@@ -200,8 +267,8 @@ app.get('/api/stats', async (req, res) => {
         user.mergeTimes.push(parseFloat(hours.toFixed(2)));
       }
 
-      // Fetch PR detail (churn) + reviews + comments in parallel
-      const [prDetail, reviews, reviewComments, issueComments] = await Promise.all([
+      // Fetch PR detail (size) + reviews + comments + file list in parallel
+      const [prDetail, reviews, reviewComments, issueComments, prFileList] = await Promise.all([
         octokit.pulls.get({ owner: prOwner, repo: prRepo, pull_number: pr.number })
           .then(r => r.data).catch(() => ({})),
         octokit.pulls.listReviews({ owner: prOwner, repo: prRepo, pull_number: pr.number })
@@ -210,12 +277,23 @@ app.get('/api/stats', async (req, res) => {
           .then(r => r.data).catch(() => []),
         octokit.issues.listComments({ owner: prOwner, repo: prRepo, issue_number: pr.number })
           .then(r => r.data).catch(() => []),
+        octokit.pulls.listFiles({ owner: prOwner, repo: prRepo, pull_number: pr.number })
+          .then(r => r.data.map(f => f.filename)).catch(() => []),
       ]);
 
-      // Accumulate churn
+      // Accumulate code-size stats
       user.totalAdditions    += prDetail.additions     || 0;
       user.totalDeletions    += prDetail.deletions     || 0;
       user.totalFilesChanged += prDetail.changed_files || 0;
+
+      // Record merged PR for cross-author churn detection (30-day window, computed after loop)
+      if (pr.merged_at) {
+        mergedPRsForChurn.push({
+          mergedAt: pr.merged_at,
+          author:   author.toLowerCase(),
+          files:    new Set(prFileList),
+        });
+      }
 
       // Track who commented on this PR (excluding the PR author)
       const commentersOnPR = new Set();
@@ -246,6 +324,9 @@ app.get('/api/stats', async (req, res) => {
       }
     }
 
+    // File-level churn pass: files authored by A reworked by another person within 30 days
+    const churnData = computeChurnData(mergedPRsForChurn);
+
     const stats = Array.from(userStats.values())
       .filter(u => !authorFilter || authorFilter.has(u.login.toLowerCase()))
       .map(u => {
@@ -254,25 +335,39 @@ app.get('/api/stats', async (req, res) => {
           : null;
 
         const n = u.prsSubmitted || 1; // avoid div/0
+
+        // Churn score: % of files you authored that someone else touched within 30 days
+        const churnEntry    = churnData.get(u.login.toLowerCase());
+        const churnedFiles  = churnEntry?.churnedFiles.size ?? 0;
+        const filesAuthored = churnEntry?.totalFiles.size  ?? 0;
+        const churnScore    = filesAuthored > 0
+          ? parseFloat((churnedFiles / filesAuthored * 100).toFixed(1))
+          : null; // null = no merged PRs to measure against
+
         return {
           login: u.login,
           avatarUrl: u.avatarUrl,
           prsSubmitted: u.prsSubmitted,
           weeklyPRAvg: parseFloat((u.prsSubmitted / weeksNum).toFixed(1)),
           weeklyPRs: u.weeklyPRs,
+          // PR type breakdown
+          prsByType: u.prsByType,
           // Merge stats
           mergedPRs: u.mergeTimes.length,
           avgMergeTimeHours: avgMerge !== null ? parseFloat(avgMerge.toFixed(1)) : null,
           minMergeTimeHours: u.mergeTimes.length ? parseFloat(Math.min(...u.mergeTimes).toFixed(1)) : null,
           maxMergeTimeHours: u.mergeTimes.length ? parseFloat(Math.max(...u.mergeTimes).toFixed(1)) : null,
-          // Code churn & size
+          // Code size (raw lines)
           totalAdditions: u.totalAdditions,
           totalDeletions: u.totalDeletions,
-          totalChurn: u.totalAdditions + u.totalDeletions,
           avgAdditions: Math.round(u.totalAdditions / n),
           avgDeletions: Math.round(u.totalDeletions / n),
           avgPRSize: Math.round((u.totalAdditions + u.totalDeletions) / n),
           avgFilesChanged: parseFloat((u.totalFilesChanged / n).toFixed(1)),
+          // Real churn: files reworked by others within 30 days of your merge
+          churnedFiles,
+          filesAuthored,
+          churnScore,
           // Review engagement
           commentsOnOthers: u.commentsOnOthers,
           weeklyCommentAvg: parseFloat((u.commentsOnOthers / weeksNum).toFixed(1)),

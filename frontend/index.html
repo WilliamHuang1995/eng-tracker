@@ -106,17 +106,20 @@
 
     .config-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr 1fr auto;
+      grid-template-columns: 1fr auto auto;
       gap: 12px;
       align-items: end;
       max-width: 720px;
       margin-bottom: 12px;
     }
 
-    .authors-row {
+    /* shared style for both config textareas */
+    .config-textarea {
       max-width: 720px;
+      margin-bottom: 12px;
     }
 
+    .config-textarea textarea,
     .authors-row textarea {
       width: 100%;
       padding: 7px 10px;
@@ -127,12 +130,15 @@
       font-size: 12px;
       font-family: 'SF Mono', 'Fira Mono', monospace;
       resize: vertical;
-      min-height: 52px;
-      line-height: 1.5;
+      line-height: 1.6;
       transition: border-color 0.15s;
     }
+    .config-textarea textarea:focus,
     .authors-row textarea:focus { outline: none; border-color: var(--accent); }
+    .config-textarea textarea::placeholder,
     .authors-row textarea::placeholder { color: var(--muted); }
+
+    .authors-row { max-width: 720px; }
 
     .form-group label {
       display: block;
@@ -167,10 +173,8 @@
     #errorBanner {
       display: none;
       background: rgba(248,81,73,0.1);
-      border: 1px solid rgba(248,81,73,0.35);
-      border-radius: 8px;
-      padding: 12px 16px;
-      margin-bottom: 20px;
+      border-bottom: 1px solid rgba(248,81,73,0.35);
+      padding: 10px 24px;
       color: var(--red);
       font-size: 13px;
     }
@@ -400,15 +404,15 @@
 
 <!-- ── CONFIG PANEL ──────────────────────────── -->
 <section id="configPanel">
+  <!-- Repos textarea -->
+  <div class="config-textarea">
+    <div class="form-group">
+      <label>Repositories <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(one <code style="background:var(--surface2);padding:1px 5px;border-radius:3px">owner/repo</code> per line)</span></label>
+      <textarea id="repos" rows="3" placeholder="my-org/backend&#10;my-org/frontend&#10;my-org/infra"></textarea>
+    </div>
+  </div>
+  <!-- Time range + fetch -->
   <div class="config-grid">
-    <div class="form-group">
-      <label>Owner / Org</label>
-      <input type="text" id="owner" placeholder="octocat" />
-    </div>
-    <div class="form-group">
-      <label>Repository</label>
-      <input type="text" id="repo" placeholder="my-repo" />
-    </div>
     <div class="form-group">
       <label>Time Range</label>
       <select id="weeks">
@@ -419,22 +423,30 @@
         <option value="12">Last 12 weeks</option>
       </select>
     </div>
-    <div>
+    <div style="align-self:end">
       <button class="btn btn-primary" onclick="fetchStats()">Fetch</button>
     </div>
   </div>
-  <div class="authors-row">
+  <!-- Author filter: team OR manual list -->
+  <div class="config-textarea">
     <div class="form-group">
-      <label>Filter Authors <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(comma-separated GitHub usernames — leave blank for everyone)</span></label>
-      <textarea id="authors" placeholder="guzpr, rthonio, dynamiteNing, darylhjd, timchen-stxcop, stxPrajna, joshualin-stx, adityamayapada, aprido-straitsx"></textarea>
+      <label>GitHub Team <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(org/team-slug — resolved automatically, e.g. <code style="background:var(--surface2);padding:1px 5px;border-radius:3px">payfazz/cop</code>)</span></label>
+      <input type="text" id="team" placeholder="my-org/my-team" style="width:100%;padding:7px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;font-family:inherit;" />
+    </div>
+  </div>
+  <div class="authors-row" id="manualAuthorsRow">
+    <div class="form-group">
+      <label>Or manually filter authors <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(comma-separated — ignored when Team is set)</span></label>
+      <textarea id="authors" rows="2" placeholder="guzpr, rthonio, dynamiteNing, darylhjd, timchen-stxcop, stxPrajna, joshualin-stx, adityamayapada, aprido-straitsx"></textarea>
     </div>
   </div>
 </section>
 
+<!-- Error banner sits between config and main — always visible -->
+<div id="errorBanner"></div>
+
 <!-- ── MAIN ──────────────────────────────────── -->
 <main>
-  <div id="errorBanner"></div>
-
   <div id="loading">
     <div class="spinner"></div>
     <p style="color:var(--muted)">Fetching PR data from GitHub…</p>
@@ -471,6 +483,9 @@
               <th onclick="sortBy('prsSubmitted')">PRs Total</th>
               <th onclick="sortBy('weeklyPRAvg')">PRs / Week</th>
               <th onclick="sortBy('mergedPRs')">Merged</th>
+              <th onclick="sortBy('avgPRSize')">Avg PR Size</th>
+              <th onclick="sortBy('avgFilesChanged')">Avg Files</th>
+              <th onclick="sortBy('totalChurn')">Total Churn</th>
               <th onclick="sortBy('avgMergeTimeHours')">Avg Merge Time</th>
               <th onclick="sortBy('minMergeTimeHours')">Fastest Merge</th>
               <th onclick="sortBy('commentsOnOthers')">Comments on Others</th>
@@ -508,6 +523,18 @@
       </div>
     </div>
 
+    <!-- Charts row 3: code churn -->
+    <div class="charts-grid">
+      <div class="chart-card">
+        <h3>Code Churn — Additions vs Deletions</h3>
+        <div class="chart-wrap"><canvas id="chartChurn"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <h3>Avg Files Changed per PR</h3>
+        <div class="chart-wrap"><canvas id="chartFiles"></canvas></div>
+      </div>
+    </div>
+
     <!-- Weekly trend (full width) -->
     <div class="chart-full">
       <h3>Weekly PR Trend — Top contributors</h3>
@@ -533,14 +560,25 @@ const charts = {};
   if (saved) {
     try {
       const c = JSON.parse(saved);
-      document.getElementById('owner').value   = c.owner   || '';
-      document.getElementById('repo').value    = c.repo    || '';
+      // Clear stale data from old single-repo format (had owner/repo instead of repos)
+      if (!c.repos) {
+        localStorage.removeItem('engTracker');
+        toggleConfig();
+        return;
+      }
+      document.getElementById('repos').value   = c.repos   || '';
       document.getElementById('weeks').value   = c.weeks   || '4';
+      document.getElementById('team').value    = c.team    || '';
       document.getElementById('authors').value = c.authors || '';
-    } catch (_) {}
+      // Still open config if repos textarea ended up empty somehow
+      if (!c.repos.trim()) toggleConfig();
+    } catch (_) {
+      localStorage.removeItem('engTracker');
+      toggleConfig();
+    }
+  } else {
+    toggleConfig();
   }
-  // Open config if nothing is saved
-  if (!saved) toggleConfig();
 })();
 
 // ─────────────────────────────────────────────
@@ -582,6 +620,17 @@ function commentBadge(v) {
   return `<span class="badge ${cls}">${v}/wk</span>`;
 }
 
+function formatLines(n) {
+  if (n === null || n === undefined) return '—';
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
+function prSizeBadge(lines) {
+  if (!lines && lines !== 0) return '<span class="na">—</span>';
+  const cls = lines < 100 ? 'badge-green' : lines < 500 ? 'badge-yellow' : 'badge-red';
+  return `<span class="badge ${cls}">${formatLines(lines)} lines</span>`;
+}
+
 function silentHtml(total, silent) {
   if (total === 0) return '<span class="na">—</span>';
   const pct = Math.round((silent / total) * 100);
@@ -605,19 +654,30 @@ const PALETTE = [
 //  Fetch
 // ─────────────────────────────────────────────
 async function fetchStats() {
-  const owner   = document.getElementById('owner').value.trim();
-  const repo    = document.getElementById('repo').value.trim();
+  const repos   = document.getElementById('repos').value
+    .split(/[\n,]+/).map(r => r.trim()).filter(Boolean).join(',');
   const weeks   = document.getElementById('weeks').value;
+  const team    = document.getElementById('team').value.trim();
   const authors = document.getElementById('authors').value
     .split(/[\n,]+/).map(a => a.trim()).filter(Boolean).join(',');
 
-  if (!owner || !repo) {
-    showError('Please fill in owner and repository.');
+  console.log('[EngTracker] fetchStats →', { repos, weeks, authors });
+
+  if (!repos) {
+    showError('Please enter at least one repository in the format owner/repo.');
     document.getElementById('configPanel').classList.add('open');
     return;
   }
 
-  localStorage.setItem('engTracker', JSON.stringify({ owner, repo, weeks, authors }));
+  // Validate each entry looks like owner/repo
+  const invalid = repos.split(',').filter(r => !r.includes('/') || r.split('/').length !== 2);
+  if (invalid.length) {
+    showError(`Invalid repo format: "${invalid[0]}" — use owner/repo (e.g. my-org/backend)`);
+    document.getElementById('configPanel').classList.add('open');
+    return;
+  }
+
+  localStorage.setItem('engTracker', JSON.stringify({ repos, weeks, team, authors }));
 
   const btn = document.getElementById('fetchBtn');
   btn.disabled = true;
@@ -629,10 +689,14 @@ async function fetchStats() {
   document.getElementById('errorBanner').style.display = 'none';
 
   try {
-    const qs = new URLSearchParams({ owner, repo, weeks, ...(authors && { authors }) });
+    const qs = new URLSearchParams({
+      repos, weeks,
+      ...(team    && { team }),
+      ...(authors && !team && { authors }),
+    });
     const res = await fetch(`/api/stats?${qs}`);
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Request failed');
+    if (!res.ok) throw new Error(data.error || `Server error ${res.status}`);
 
     currentData = data;
     renderDashboard(data);
@@ -642,13 +706,17 @@ async function fetchStats() {
     document.getElementById('lastUpdated').textContent =
       `Updated ${new Date().toLocaleTimeString()}`;
 
-    // Show rate limit
     fetchRateLimit();
 
   } catch (err) {
+    console.error('[EngTracker] fetch error:', err);
     document.getElementById('loading').style.display = 'none';
     document.getElementById('emptyState').style.display = 'block';
-    showError(err.message);
+    // Surface network errors more clearly
+    const msg = err.message === 'Failed to fetch'
+      ? 'Cannot reach server — make sure the backend is running on port 3001.'
+      : err.message;
+    showError(msg);
   } finally {
     btn.disabled = false;
     btn.textContent = 'Fetch Stats';
@@ -672,15 +740,27 @@ async function fetchRateLimit() {
 function renderDashboard({ stats, meta }) {
   // Meta bar
   const since = new Date(meta.since).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
-  const authorNote = meta.authorFilter
-    ? `<span>Filtered: <strong style="color:var(--accent)">${meta.authorFilter.join(', ')}</strong></span>`
+  const repoTags = meta.repos.map(r =>
+    `<span style="background:var(--surface2);border:1px solid var(--border);padding:1px 7px;border-radius:10px;font-size:11px">${r}</span>`
+  ).join(' ');
+
+  const failedNote = meta.failedRepos?.length
+    ? `<span style="color:var(--red)">⚠ Failed: ${meta.failedRepos.map(f => f.repo).join(', ')}</span>`
     : '';
+
+  const teamNote = meta.resolvedTeam
+    ? `<span>Team: <strong style="color:var(--accent)">${meta.resolvedTeam.slug}</strong> (${meta.resolvedTeam.members.length} members)</span>`
+    : meta.authorFilter
+      ? `<span>Filtered: <strong style="color:var(--accent)">${meta.authorFilter.join(', ')}</strong></span>`
+      : '';
+
   document.getElementById('metaBar').innerHTML = `
-    <span><strong>${meta.owner}/${meta.repo}</strong></span>
+    <span>${repoTags}</span>
     <span>Since ${since} (${meta.weeks} weeks)</span>
     <span>${meta.totalPRs} PRs analyzed</span>
     <span>${stats.length} contributors</span>
-    ${authorNote}
+    ${teamNote}
+    ${failedNote}
     <span>Generated ${new Date(meta.generatedAt).toLocaleString()}</span>
   `;
 
@@ -750,6 +830,9 @@ function renderTable(stats) {
       <td><strong>${u.prsSubmitted}</strong></td>
       <td>${weeklyPRBadge(u.weeklyPRAvg)}</td>
       <td>${u.mergedPRs}</td>
+      <td>${prSizeBadge(u.avgPRSize)}</td>
+      <td>${u.avgFilesChanged ?? '<span class="na">—</span>'}</td>
+      <td><span style="color:var(--muted);font-size:12px">+${formatLines(u.totalAdditions)} / -${formatLines(u.totalDeletions)}</span></td>
       <td>${mergeBadgeHtml(u.avgMergeTimeHours)}</td>
       <td>${u.minMergeTimeHours !== null ? `<span style="color:var(--green)">${formatHours(u.minMergeTimeHours)}</span>` : '<span class="na">—</span>'}</td>
       <td><strong>${u.commentsOnOthers}</strong></td>
@@ -760,8 +843,10 @@ function renderTable(stats) {
   `).join('');
 
   // Update sort indicators
-  const cols = ['login','prsSubmitted','weeklyPRAvg','mergedPRs','avgMergeTimeHours',
-                 'minMergeTimeHours','commentsOnOthers','weeklyCommentAvg',
+  const cols = ['login','prsSubmitted','weeklyPRAvg','mergedPRs',
+                 'avgPRSize','avgFilesChanged','totalChurn',
+                 'avgMergeTimeHours','minMergeTimeHours',
+                 'commentsOnOthers','weeklyCommentAvg',
                  'approvalsTotal','approvalsWithoutComments'];
   document.querySelectorAll('#engTable th').forEach((th, i) => {
     th.classList.remove('sort-asc','sort-desc');
@@ -902,7 +987,61 @@ function renderCharts(stats, meta) {
     },
   });
 
-  // 5. Weekly PR Trend (line) — top 6 contributors by total PRs
+  // 5. Code Churn — stacked: additions (green) + deletions (red)
+  charts.churn = new Chart(document.getElementById('chartChurn'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Additions',
+          data: stats.map(s => s.totalAdditions),
+          backgroundColor: '#3fb95066',
+          borderColor: '#3fb950',
+          borderWidth: 1,
+          borderRadius: 4,
+        },
+        {
+          label: 'Deletions',
+          data: stats.map(s => s.totalDeletions),
+          backgroundColor: '#f8514966',
+          borderColor: '#f85149',
+          borderWidth: 1,
+          borderRadius: 4,
+        },
+      ],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: true, labels: { color: '#8b949e', font: { size: 12 }, boxWidth: 12 } },
+      },
+      scales: {
+        x: { stacked: true, grid: { color: '#30363d' }, ticks: { color: '#8b949e' } },
+        y: { stacked: true, grid: { display: false }, ticks: { color: '#c9d1d9', font: { size: 12 } } },
+      },
+    },
+  });
+
+  // 6. Avg Files Changed per PR
+  charts.files = new Chart(document.getElementById('chartFiles'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        data: stats.map(s => s.avgFilesChanged),
+        backgroundColor: '#bc8cff55',
+        borderColor: '#bc8cff',
+        borderWidth: 1,
+        borderRadius: 4,
+      }],
+    },
+    options: barOptions(),
+  });
+
+  // 7. Weekly PR Trend (line) — top 6 contributors by total PRs
   const topN = [...stats].sort((a,b) => b.prsSubmitted - a.prsSubmitted).slice(0, 6);
 
   // Collect all week labels across all users, sorted

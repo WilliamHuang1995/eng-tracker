@@ -106,7 +106,7 @@
 
     .config-grid {
       display: grid;
-      grid-template-columns: 1fr auto auto;
+      grid-template-columns: 1fr 1fr auto auto;
       gap: 12px;
       align-items: end;
       max-width: 720px;
@@ -148,6 +148,11 @@
       text-transform: uppercase;
       letter-spacing: 0.6px;
       margin-bottom: 5px;
+    }
+
+    .form-group input[type="date"]::-webkit-calendar-picker-indicator {
+      filter: invert(0.6);
+      cursor: pointer;
     }
 
     .form-group input,
@@ -413,11 +418,20 @@
       <textarea id="repos" rows="3" placeholder="my-org/backend&#10;my-org/frontend&#10;my-org/infra"></textarea>
     </div>
   </div>
-  <!-- Time range + fetch -->
+  <!-- Date range + fetch -->
   <div class="config-grid">
     <div class="form-group">
-      <label>Time Range</label>
-      <select id="weeks">
+      <label>From</label>
+      <input type="date" id="dateFrom" onchange="document.getElementById('quickRange').value=''" />
+    </div>
+    <div class="form-group">
+      <label>To</label>
+      <input type="date" id="dateTo" onchange="document.getElementById('quickRange').value=''" />
+    </div>
+    <div class="form-group">
+      <label>Quick Range</label>
+      <select id="quickRange" onchange="applyQuickRange()">
+        <option value="">Custom</option>
         <option value="1">Last 1 week</option>
         <option value="2">Last 2 weeks</option>
         <option value="4" selected>Last 4 weeks</option>
@@ -570,10 +584,15 @@ const charts = {};
         toggleConfig();
         return;
       }
-      document.getElementById('repos').value   = c.repos   || '';
-      document.getElementById('weeks').value   = c.weeks   || '4';
-      document.getElementById('team').value    = c.team    || '';
-      document.getElementById('authors').value = c.authors || '';
+      document.getElementById('repos').value      = c.repos      || '';
+      document.getElementById('dateFrom').value   = c.dateFrom   || '';
+      document.getElementById('dateTo').value     = c.dateTo     || '';
+      // Fall back to old 'weeks' key for backwards compatibility
+      document.getElementById('quickRange').value = c.quickRange || c.weeks || '4';
+      document.getElementById('team').value       = c.team       || '';
+      document.getElementById('authors').value    = c.authors    || '';
+      // If no explicit dates saved, fill them from the quick range
+      if (!c.dateFrom) applyQuickRange();
       // Still open config if repos textarea ended up empty somehow
       if (!c.repos.trim()) toggleConfig();
     } catch (_) {
@@ -597,6 +616,16 @@ function showError(msg) {
   el.textContent = '⚠  ' + msg;
   el.style.display = 'block';
   setTimeout(() => { el.style.display = 'none'; }, 10000);
+}
+
+function applyQuickRange() {
+  const weeks = parseInt(document.getElementById('quickRange').value);
+  if (!weeks) return;
+  const to   = new Date();
+  const from = new Date();
+  from.setDate(from.getDate() - weeks * 7);
+  document.getElementById('dateTo').value   = to.toISOString().slice(0, 10);
+  document.getElementById('dateFrom').value = from.toISOString().slice(0, 10);
 }
 
 function formatHours(h) {
@@ -688,12 +717,21 @@ const PALETTE = [
 async function fetchStats() {
   const repos   = document.getElementById('repos').value
     .split(/[\n,]+/).map(r => r.trim()).filter(Boolean).join(',');
-  const weeks   = document.getElementById('weeks').value;
   const team    = document.getElementById('team').value.trim();
   const authors = document.getElementById('authors').value
     .split(/[\n,]+/).map(a => a.trim()).filter(Boolean).join(',');
+  const quickRange = document.getElementById('quickRange').value;
 
-  console.log('[EngTracker] fetchStats →', { repos, weeks, authors });
+  // If either date is blank, fill both from the quick-range preset
+  let dateFrom = document.getElementById('dateFrom').value;
+  let dateTo   = document.getElementById('dateTo').value;
+  if (!dateFrom || !dateTo) {
+    applyQuickRange();
+    dateFrom = document.getElementById('dateFrom').value;
+    dateTo   = document.getElementById('dateTo').value;
+  }
+
+  console.log('[EngTracker] fetchStats →', { repos, dateFrom, dateTo, authors });
 
   if (!repos) {
     showError('Please enter at least one repository in the format owner/repo.');
@@ -709,7 +747,7 @@ async function fetchStats() {
     return;
   }
 
-  localStorage.setItem('engTracker', JSON.stringify({ repos, weeks, team, authors }));
+  localStorage.setItem('engTracker', JSON.stringify({ repos, dateFrom, dateTo, quickRange, team, authors }));
 
   const btn = document.getElementById('fetchBtn');
   btn.disabled = true;
@@ -722,7 +760,9 @@ async function fetchStats() {
 
   try {
     const qs = new URLSearchParams({
-      repos, weeks,
+      repos,
+      since: dateFrom,
+      until: dateTo,
       ...(team    && { team }),
       ...(authors && !team && { authors }),
     });
@@ -917,7 +957,9 @@ renderDashboard(SNAPSHOT);
 // ─────────────────────────────────────────────
 function renderDashboard({ stats, meta }) {
   // Meta bar
-  const since = new Date(meta.since).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+  const fmtDate = iso => new Date(iso).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+  const since = fmtDate(meta.since);
+  const until = fmtDate(meta.until || new Date().toISOString());
   const repoTags = meta.repos.map(r =>
     `<span style="background:var(--surface2);border:1px solid var(--border);padding:1px 7px;border-radius:10px;font-size:11px">${r}</span>`
   ).join(' ');
@@ -934,7 +976,7 @@ function renderDashboard({ stats, meta }) {
 
   document.getElementById('metaBar').innerHTML = `
     <span>${repoTags}</span>
-    <span>Since ${since} (${meta.weeks} weeks)</span>
+    <span>${since} → ${until} (${meta.weeks} wks)</span>
     <span>${meta.totalPRs} PRs analyzed</span>
     <span>${stats.length} contributors</span>
     ${teamNote}

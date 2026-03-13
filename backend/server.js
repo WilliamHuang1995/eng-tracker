@@ -31,7 +31,7 @@ function getWeekStart(dateStr) {
   return monday.toISOString().split('T')[0];
 }
 
-async function fetchAllPRs(owner, repo, since) {
+async function fetchAllPRs(owner, repo, since, until) {
   const prs = [];
   let page = 1;
 
@@ -45,7 +45,10 @@ async function fetchAllPRs(owner, repo, since) {
       direction: 'desc',
     });
 
-    const inRange = data.filter(pr => new Date(pr.created_at) >= since);
+    const inRange = data.filter(pr => {
+      const d = new Date(pr.created_at);
+      return d >= since && d <= until;
+    });
     // Tag each PR with its source repo so the processing loop uses the right API coords
     prs.push(...inRange.map(pr => ({ ...pr, _owner: owner, _repo: repo })));
 
@@ -162,7 +165,8 @@ app.get('/api/rate-limit', async (req, res) => {
 });
 
 app.get('/api/stats', async (req, res) => {
-  const { repos = '', weeks = '4', authors = '', team = '' } = req.query;
+  const { repos = '', weeks = '4', authors = '', team = '',
+          since: sinceParam = '', until: untilParam = '' } = req.query;
 
   // Parse repos: comma-separated "owner/repo" pairs
   const repoList = repos.split(',')
@@ -177,7 +181,7 @@ app.get('/api/stats', async (req, res) => {
     return res.status(400).json({ error: 'At least one repo is required (format: owner/repo)' });
   }
 
-  const cacheKey = `${repos}/${weeks}/${team || authors}`;
+  const cacheKey = `${repos}/${sinceParam || weeks}/${untilParam}/${team || authors}`;
   const cached = cache.get(cacheKey);
   if (cached && Date.now() - cached.ts < CACHE_TTL) {
     console.log('Cache hit');
@@ -199,14 +203,25 @@ app.get('/api/stats', async (req, res) => {
       authorFilter = new Set(authors.split(',').map(a => a.trim().toLowerCase()).filter(Boolean));
     }
 
-    const weeksNum = parseInt(weeks);
-    const since = new Date();
-    since.setDate(since.getDate() - weeksNum * 7);
+    // Resolve date range — explicit since/until take priority over the weeks shortcut
+    const untilDate = untilParam
+      ? new Date(untilParam + 'T23:59:59.999Z')
+      : new Date();
+    const sinceDate = sinceParam
+      ? new Date(sinceParam + 'T00:00:00.000Z')
+      : (() => {
+          const d = new Date(untilDate);
+          d.setDate(d.getDate() - parseInt(weeks) * 7);
+          return d;
+        })();
+
+    // Derive weeks count from the actual span (used for per-week averages)
+    const weeksNum = Math.max(1, Math.round((untilDate - sinceDate) / (7 * 24 * 3600 * 1000)));
 
     // Fetch PRs from all repos in parallel; continue even if one fails
-    console.log(`Fetching PRs from ${repoList.length} repo(s) since ${since.toDateString()}`);
+    console.log(`Fetching PRs from ${repoList.length} repo(s)  ${sinceDate.toDateString()} → ${untilDate.toDateString()}`);
     const fetchResults = await Promise.allSettled(
-      repoList.map(({ owner, repo }) => fetchAllPRs(owner, repo, since))
+      repoList.map(({ owner, repo }) => fetchAllPRs(owner, repo, sinceDate, untilDate))
     );
 
     const failedRepos = [];
@@ -386,7 +401,8 @@ app.get('/api/stats', async (req, res) => {
         repos: repoList.map(r => `${r.owner}/${r.repo}`),
         failedRepos,
         weeks: weeksNum,
-        since: since.toISOString(),
+        since: sinceDate.toISOString(),
+        until: untilDate.toISOString(),
         totalPRs: allPRs.length,
         resolvedTeam,
         authorFilter: authorFilter ? Array.from(authorFilter) : null,

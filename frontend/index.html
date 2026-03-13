@@ -398,6 +398,8 @@
     <span id="rateLimit" style="display:none;"></span>
     <span id="lastUpdated"></span>
     <button class="btn" onclick="toggleConfig()">⚙ Config</button>
+    <button class="btn" id="exportBtn" onclick="exportSnapshot()" style="display:none"
+      title="Download a self-contained HTML snapshot of this report">⬇ Export</button>
     <button class="btn btn-primary" id="fetchBtn" onclick="fetchStats()">Fetch Stats</button>
   </div>
 </header>
@@ -730,6 +732,7 @@ async function fetchStats() {
 
     currentData = data;
     renderDashboard(data);
+    document.getElementById('exportBtn').style.display = '';
 
     document.getElementById('loading').style.display = 'none';
     document.getElementById('dashboard').style.display = 'block';
@@ -762,6 +765,151 @@ async function fetchRateLimit() {
     const color = d.remaining < 100 ? 'var(--red)' : d.remaining < 500 ? 'var(--yellow)' : 'var(--muted)';
     el.innerHTML = `API: <strong style="color:${color}">${d.remaining}</strong>/${d.limit}`;
   } catch (_) {}
+}
+
+// ─────────────────────────────────────────────
+//  Export Snapshot
+// ─────────────────────────────────────────────
+function exportSnapshot() {
+  if (!currentData) return;
+
+  const css = document.querySelector('style').textContent;
+  const dt  = new Date(currentData.meta.generatedAt);
+  const filename = `eng-tracker-${dt.toISOString().slice(0, 10)}.html`;
+
+  // Escape end-script tags inside the JSON so the browser doesn't close this block early
+  const snapshotJson = JSON.stringify(currentData)
+    .replace(/<\/script>/gi, '<\\/script>');
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Eng Tracker \u2014 ${dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"><\/script>
+  <style>${css}</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">\u{1F4CA}</div>
+    Eng Tracker
+  </div>
+  <div class="header-right">
+    <span id="lastUpdated">Snapshot \u00b7 ${dt.toLocaleString()}</span>
+  </div>
+</header>
+
+<main>
+  <div id="dashboard" style="display:block">
+    <div class="meta-bar" id="metaBar"></div>
+    <div class="overview-grid" id="overviewGrid"></div>
+
+    <div class="table-section">
+      <div class="table-header">
+        <h2>Engineer Breakdown</h2>
+        <span class="table-hint">Click any column header to sort</span>
+      </div>
+      <div class="table-wrap">
+        <table id="engTable">
+          <thead>
+            <tr>
+              <th onclick="sortBy('login')">Engineer</th>
+              <th onclick="sortBy('prsSubmitted')">PRs Total</th>
+              <th onclick="sortBy('weeklyPRAvg')">PRs / Week</th>
+              <th onclick="sortBy('mergedPRs')">Merged</th>
+              <th>PR Types</th>
+              <th onclick="sortBy('avgPRSize')">Avg PR Size</th>
+              <th onclick="sortBy('avgFilesChanged')">Avg Files</th>
+              <th>Lines \u00b1</th>
+              <th onclick="sortBy('churnScore')" title="% of files you authored that were modified by another person within 30 days of your merge">Churn Score \u24d8</th>
+              <th onclick="sortBy('avgMergeTimeHours')">Avg Merge Time</th>
+              <th onclick="sortBy('minMergeTimeHours')">Fastest Merge</th>
+              <th onclick="sortBy('commentsOnOthers')">Comments on Others</th>
+              <th onclick="sortBy('weeklyCommentAvg')">Comments / Week</th>
+              <th onclick="sortBy('approvalsTotal')">Approvals</th>
+              <th onclick="sortBy('approvalsWithoutComments')">Silent Approvals \u24d8</th>
+            </tr>
+          </thead>
+          <tbody id="tableBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="charts-grid">
+      <div class="chart-card"><h3>PRs Submitted</h3><div class="chart-wrap"><canvas id="chartPRs"></canvas></div></div>
+      <div class="chart-card"><h3>Avg Merge Time (hours)</h3><div class="chart-wrap"><canvas id="chartMerge"></canvas></div></div>
+    </div>
+    <div class="charts-grid">
+      <div class="chart-card"><h3>Comments on Others\u2019 PRs</h3><div class="chart-wrap"><canvas id="chartComments"></canvas></div></div>
+      <div class="chart-card"><h3>Approvals \u2014 With vs Without Comments</h3><div class="chart-wrap"><canvas id="chartApprovals"></canvas></div></div>
+    </div>
+    <div class="charts-grid">
+      <div class="chart-card"><h3>PR Type Distribution</h3><div class="chart-wrap"><canvas id="chartChurn"></canvas></div></div>
+      <div class="chart-card"><h3>Churn Score \u2014 % of authored files reworked by others within 30 days</h3><div class="chart-wrap"><canvas id="chartFiles"></canvas></div></div>
+    </div>
+    <div class="chart-full">
+      <h3>Weekly PR Trend \u2014 Top contributors</h3>
+      <div class="chart-full-wrap"><canvas id="chartTrend"></canvas></div>
+    </div>
+  </div>
+</main>
+
+<script>
+// ── Snapshot data ──────────────────────────────────────────────
+const SNAPSHOT  = ${snapshotJson};
+let currentData = SNAPSHOT;
+let sortKey     = 'prsSubmitted';
+let sortDir     = 'desc';
+const charts    = {};
+
+// ── Helpers ────────────────────────────────────────────────────
+${formatHours.toString()}
+${mergeBadgeHtml.toString()}
+${weeklyPRBadge.toString()}
+${commentBadge.toString()}
+${formatLines.toString()}
+${prSizeBadge.toString()}
+${silentHtml.toString()}
+
+const TYPE_COLORS = ${JSON.stringify(TYPE_COLORS)};
+${prTypesBadges.toString()}
+${churnScoreBadge.toString()}
+
+const PALETTE = ${JSON.stringify(PALETTE)};
+
+// ── Render ─────────────────────────────────────────────────────
+${renderDashboard.toString()}
+${renderTable.toString()}
+${sortBy.toString()}
+${destroyCharts.toString()}
+${barOptions.toString()}
+${renderCharts.toString()}
+
+// ── Boot ───────────────────────────────────────────────────────
+renderDashboard(SNAPSHOT);
+<\/script>
+</body>
+</html>`;
+
+  try {
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a); // must be in DOM for Firefox + Chrome
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    console.log('[EngTracker] Export saved:', filename);
+  } catch (err) {
+    console.error('[EngTracker] Export failed:', err);
+    showError('Export failed — see browser console for details.');
+  }
 }
 
 // ─────────────────────────────────────────────

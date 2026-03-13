@@ -29,8 +29,7 @@ Generate a Personal Access Token at https://github.com/settings/tokens
 
 Required scopes: **repo** (for private repos) or **public_repo** (for public repos only)
 
-The token is stored in your browser's localStorage and sent to the local backend only.
-It never leaves your machine.
+Set it inside backend/.env
 
 ## Rate limits
 

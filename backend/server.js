@@ -13,9 +13,12 @@ if (!GITHUB_TOKEN) {
 const octokit = new Octokit({ auth: GITHUB_TOKEN });
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const FRONTEND = join(__dirname, '../frontend');
 const app = express();
 app.use(express.json());
-app.use(express.static(join(__dirname, '../frontend')));
+app.use(express.static(FRONTEND));
+
+app.get('/', (req, res) => res.sendFile(join(FRONTEND, 'index.html')));
 
 // In-memory cache — 24 hour TTL
 const cache = new Map();

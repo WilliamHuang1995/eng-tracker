@@ -4,19 +4,18 @@ import { Octokit } from '@octokit/rest';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-if (!GITHUB_TOKEN) {
-  console.error('ERROR: GITHUB_TOKEN is not set in .env');
-  process.exit(1);
-}
-
-const octokit = new Octokit({ auth: GITHUB_TOKEN });
-
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FRONTEND = join(__dirname, '../frontend');
 const app = express();
 app.use(express.json());
 app.use(express.static(FRONTEND));
+
+function requireToken(req, res, next) {
+  const token = req.headers.authorization?.replace(/^Bearer\s+/i, '').trim();
+  if (!token) return res.status(401).json({ error: 'GitHub token required. Provide it via Authorization: Bearer <token>.' });
+  req.octokit = new Octokit({ auth: token });
+  next();
+}
 
 app.get('/', (req, res) => res.sendFile(join(FRONTEND, 'index.html')));
 
@@ -34,7 +33,7 @@ function getWeekStart(dateStr) {
   return monday.toISOString().split('T')[0];
 }
 
-async function fetchAllPRs(owner, repo, since, until) {
+async function fetchAllPRs(octokit, owner, repo, since, until) {
   const prs = [];
   let page = 1;
 
@@ -64,7 +63,7 @@ async function fetchAllPRs(owner, repo, since, until) {
 }
 
 // Resolve a GitHub team slug → list of member logins (lowercase)
-async function resolveTeamMembers(org, teamSlug) {
+async function resolveTeamMembers(octokit, org, teamSlug) {
   const members = [];
   let page = 1;
   while (true) {
@@ -144,30 +143,30 @@ function computeChurnData(mergedPRs, windowDays = 30) {
   return result;
 }
 
-app.get('/api/resolve-team', async (req, res) => {
+app.get('/api/resolve-team', requireToken, async (req, res) => {
   const { team } = req.query;
   if (!team || !team.includes('/')) {
     return res.status(400).json({ error: 'team must be org/team-slug' });
   }
   const [org, teamSlug] = team.split('/');
   try {
-    const members = await resolveTeamMembers(org, teamSlug);
+    const members = await resolveTeamMembers(req.octokit, org, teamSlug);
     res.json({ team, members });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/rate-limit', async (req, res) => {
+app.get('/api/rate-limit', requireToken, async (req, res) => {
   try {
-    const { data } = await octokit.rateLimit.get();
+    const { data } = await req.octokit.rateLimit.get();
     res.json(data.rate);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/stats', async (req, res) => {
+app.get('/api/stats', requireToken, async (req, res) => {
   const { repos = '', weeks = '4', authors = '', team = '',
           since: sinceParam = '', until: untilParam = '' } = req.query;
 
@@ -198,7 +197,7 @@ app.get('/api/stats', async (req, res) => {
     if (team && team.includes('/')) {
       const [org, teamSlug] = team.split('/');
       console.log(`Resolving team ${team}...`);
-      const members = await resolveTeamMembers(org, teamSlug);
+      const members = await resolveTeamMembers(req.octokit, org, teamSlug);
       authorFilter = new Set(members);
       resolvedTeam = { slug: team, members };
       console.log(`  → ${members.length} members: ${members.join(', ')}`);
@@ -224,7 +223,7 @@ app.get('/api/stats', async (req, res) => {
     // Fetch PRs from all repos in parallel; continue even if one fails
     console.log(`Fetching PRs from ${repoList.length} repo(s)  ${sinceDate.toDateString()} → ${untilDate.toDateString()}`);
     const fetchResults = await Promise.allSettled(
-      repoList.map(({ owner, repo }) => fetchAllPRs(owner, repo, sinceDate, untilDate))
+      repoList.map(({ owner, repo }) => fetchAllPRs(req.octokit, owner, repo, sinceDate, untilDate))
     );
 
     const failedRepos = [];
@@ -290,15 +289,15 @@ app.get('/api/stats', async (req, res) => {
 
       // Fetch PR detail (size) + reviews + comments + file list in parallel
       const [prDetail, reviews, reviewComments, issueComments, prFileList] = await Promise.all([
-        octokit.pulls.get({ owner: prOwner, repo: prRepo, pull_number: pr.number })
+        req.octokit.pulls.get({ owner: prOwner, repo: prRepo, pull_number: pr.number })
           .then(r => r.data).catch(() => ({})),
-        octokit.pulls.listReviews({ owner: prOwner, repo: prRepo, pull_number: pr.number })
+        req.octokit.pulls.listReviews({ owner: prOwner, repo: prRepo, pull_number: pr.number })
           .then(r => r.data).catch(() => []),
-        octokit.pulls.listReviewComments({ owner: prOwner, repo: prRepo, pull_number: pr.number })
+        req.octokit.pulls.listReviewComments({ owner: prOwner, repo: prRepo, pull_number: pr.number })
           .then(r => r.data).catch(() => []),
-        octokit.issues.listComments({ owner: prOwner, repo: prRepo, issue_number: pr.number })
+        req.octokit.issues.listComments({ owner: prOwner, repo: prRepo, issue_number: pr.number })
           .then(r => r.data).catch(() => []),
-        octokit.pulls.listFiles({ owner: prOwner, repo: prRepo, pull_number: pr.number })
+        req.octokit.pulls.listFiles({ owner: prOwner, repo: prRepo, pull_number: pr.number })
           .then(r => r.data.map(f => f.filename)).catch(() => []),
       ]);
 

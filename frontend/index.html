@@ -411,6 +411,17 @@
 
 <!-- ── CONFIG PANEL ──────────────────────────── -->
 <section id="configPanel">
+  <!-- GitHub Token -->
+  <div class="config-textarea">
+    <div class="form-group">
+      <label>GitHub Personal Access Token</label>
+      <input type="password" id="ghToken" placeholder="github_pat_..." style="width:100%;padding:7px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;font-family:inherit;" />
+      <p style="margin-top:6px;font-size:12px;color:var(--muted)">
+        Your token stays in your browser and is never stored on our end.
+        <a href="https://github.com/settings/tokens/new?description=eng-tracker&scopes=repo,read:org" target="_blank" rel="noopener" style="color:var(--accent)">Generate one on GitHub →</a>
+      </p>
+    </div>
+  </div>
   <!-- Repos textarea -->
   <div class="config-textarea">
     <div class="form-group">
@@ -584,6 +595,7 @@ const charts = {};
         toggleConfig();
         return;
       }
+      document.getElementById('ghToken').value     = c.ghToken    || '';
       document.getElementById('repos').value      = c.repos      || '';
       document.getElementById('dateFrom').value   = c.dateFrom   || '';
       document.getElementById('dateTo').value     = c.dateTo     || '';
@@ -715,6 +727,7 @@ const PALETTE = [
 //  Fetch
 // ─────────────────────────────────────────────
 async function fetchStats() {
+  const ghToken = document.getElementById('ghToken').value.trim();
   const repos   = document.getElementById('repos').value
     .split(/[\n,]+/).map(r => r.trim()).filter(Boolean).join(',');
   const team    = document.getElementById('team').value.trim();
@@ -733,6 +746,12 @@ async function fetchStats() {
 
   console.log('[EngTracker] fetchStats →', { repos, dateFrom, dateTo, authors });
 
+  if (!ghToken) {
+    showError('Please enter your GitHub personal access token.');
+    document.getElementById('configPanel').classList.add('open');
+    return;
+  }
+
   if (!repos) {
     showError('Please enter at least one repository in the format owner/repo.');
     document.getElementById('configPanel').classList.add('open');
@@ -747,7 +766,7 @@ async function fetchStats() {
     return;
   }
 
-  localStorage.setItem('engTracker', JSON.stringify({ repos, dateFrom, dateTo, quickRange, team, authors }));
+  localStorage.setItem('engTracker', JSON.stringify({ ghToken, repos, dateFrom, dateTo, quickRange, team, authors }));
 
   const btn = document.getElementById('fetchBtn');
   btn.disabled = true;
@@ -766,7 +785,9 @@ async function fetchStats() {
       ...(team    && { team }),
       ...(authors && !team && { authors }),
     });
-    const res = await fetch(`/api/stats?${qs}`);
+    const res = await fetch(`/api/stats?${qs}`, {
+      headers: { 'Authorization': `Bearer ${ghToken}` },
+    });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `Server error ${res.status}`);
 
@@ -798,7 +819,10 @@ async function fetchStats() {
 
 async function fetchRateLimit() {
   try {
-    const res = await fetch('/api/rate-limit');
+    const token = document.getElementById('ghToken').value.trim();
+    const res = await fetch('/api/rate-limit', {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
     const d = await res.json();
     const el = document.getElementById('rateLimit');
     el.style.display = 'inline';

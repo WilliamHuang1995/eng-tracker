@@ -18,13 +18,7 @@ const app = express();
 app.use(express.json());
 app.use(express.static(FRONTEND));
 
-app.get('/debug', (req, res) => res.json({ __dirname, FRONTEND }));
-
-app.get('/', (req, res) => {
-  res.sendFile(join(FRONTEND, 'index.html'), err => {
-    if (err) res.status(500).send(`sendFile failed: ${err.message} | FRONTEND: ${FRONTEND}`);
-  });
-});
+app.get('/', (req, res) => res.sendFile(join(FRONTEND, 'index.html')));
 
 // In-memory cache — 24 hour TTL
 const cache = new Map();

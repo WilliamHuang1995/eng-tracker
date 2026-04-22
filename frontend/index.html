@@ -405,6 +405,8 @@
     <button class="btn" onclick="toggleConfig()">⚙ Config</button>
     <button class="btn" id="exportBtn" onclick="exportSnapshot()" style="display:none"
       title="Download a self-contained HTML snapshot of this report">⬇ Export</button>
+    <button class="btn" id="copyAIBtn" onclick="copyForAIReview()" style="display:none"
+      title="Copy data + scoring prompt to clipboard — paste into Claude/ChatGPT for performance review">📋 Copy for AI</button>
     <button class="btn btn-primary" id="fetchBtn" onclick="fetchStats()">Fetch Stats</button>
   </div>
 </header>
@@ -794,6 +796,7 @@ async function fetchStats() {
     currentData = data;
     renderDashboard(data);
     document.getElementById('exportBtn').style.display = '';
+    document.getElementById('copyAIBtn').style.display = '';
 
     document.getElementById('loading').style.display = 'none';
     document.getElementById('dashboard').style.display = 'block';
@@ -973,6 +976,131 @@ renderDashboard(SNAPSHOT);
   } catch (err) {
     console.error('[EngTracker] Export failed:', err);
     showError('Export failed — see browser console for details.');
+  }
+}
+
+// ─────────────────────────────────────────────
+//  Copy for AI Review
+// ─────────────────────────────────────────────
+function buildAIReviewPrompt(data) {
+  const { stats, meta } = data;
+  const payload = {
+    window: { since: meta.since, until: meta.until, weeks: meta.weeks },
+    repos: meta.repos,
+    totalPRs: meta.totalPRs,
+    engineers: stats.map(s => ({
+      login: s.login,
+      prsSubmitted: s.prsSubmitted,
+      mergedPRs: s.mergedPRs,
+      weeklyPRAvg: s.weeklyPRAvg,
+      weeklyPRs: s.weeklyPRs,
+      prsByType: s.prsByType,
+      avgPRSize: s.avgPRSize,
+      avgFilesChanged: s.avgFilesChanged,
+      totalAdditions: s.totalAdditions,
+      totalDeletions: s.totalDeletions,
+      churnScore: s.churnScore,
+      avgMergeTimeHours: s.avgMergeTimeHours,
+      minMergeTimeHours: s.minMergeTimeHours,
+      commentsOnOthers: s.commentsOnOthers,
+      weeklyCommentAvg: s.weeklyCommentAvg,
+      approvalsTotal: s.approvalsTotal,
+      approvalsWithoutComments: s.approvalsWithoutComments,
+    })),
+  };
+
+  return `You are a principled engineering manager evaluating PR performance. Score each engineer fairly using ONLY the PR metrics provided. Do not infer productivity, impact, or seniority from PR volume alone — other systems measure those dimensions already.
+
+# Ground rules
+
+1. **Score against the engineer's job grade, not against peers.** A Junior producing at Mid level is outstanding; a Senior producing at Mid level is underperforming.
+2. **Volume is context, not a score.** Throughput only matters once normalized by PR size, merge rate, churn, and PR type mix. High PR count with high churn or trivial chores is not a win.
+3. **No single metric decides a rating.** Always triangulate (e.g. small PRs + fast merges + low churn = healthy; small PRs + high churn = fragmented work).
+4. **Missing / low numbers ≠ bad** if the window is short or the engineer joined mid-window. Flag uncertainty instead of guessing.
+5. **Review participation matters more at higher grades.** Seniors with few review comments or many silent approvals should be scored down on collaboration; juniors should not.
+6. **Large PRs are neither good nor bad.** Context-heavy refactors justify size; feature sprawl does not. Use type mix and churn as tiebreakers.
+7. **Merge time is partly environmental.** Treat it as a soft signal — don't rate it harshly unless an engineer is an outlier on their own team.
+
+# Rating scale (apply within the engineer's grade)
+
+- **1 — Needs Improvement:** clearly below grade expectations across multiple dimensions.
+- **2 — Working Towards Expectation:** meets some expectations, inconsistent on others.
+- **3 — Meets Expectation:** consistently at grade bar.
+- **4 — Exceeds Expectation:** consistently above grade bar on most dimensions.
+- **5 — Outstanding:** sustained excellence; could operate one grade higher.
+
+A **2** differs from a **1** only in *consistency* (2 is steadier, not stronger). Same for 4 vs 5.
+
+# Job grades and expectations
+
+**Junior (E-1 / E-2)** — learning the codebase, shipping small-to-medium PRs, responding to review feedback.
+- Healthy signals: small-to-medium PR size, merged rate ≥ 70%, churn ≤ 30%, any review comments on peers, balanced mix (not 100% chore).
+- Don't penalize: low absolute PR count, few approvals given, modest merge times.
+- E-2 vs E-1: same expectations, E-2 shows consistency across the full window.
+
+**Mid Level (SE-1 / SE-2)** — independent delivery, trusted reviewer, balanced type mix.
+- Healthy signals: weeklyPRAvg ≥ 1.5, merged rate ≥ 80%, churn < 20%, meaningful feat/fix mix, weeklyCommentAvg ≥ 1, silent approvals < 40%.
+- Flags: churn > 25%, majority chore/other PRs, near-zero reviews on others.
+- SE-2 vs SE-1: SE-2 sustains the bar every week and reviews more broadly.
+
+**Senior (M-1 / M-2)** — high-trust delivery, force-multiplier in reviews, low-rework code.
+- Healthy signals: churn < 15%, weeklyCommentAvg ≥ 2, silent approvals < 25%, feat+fix dominate mix, PR sizes calibrated to context (not all tiny, not all huge).
+- Flags: high silent-approval rate, low comments on others' PRs, churn ≥ 20%, volume-without-substance (many chores, little feat/fix).
+- M-2 vs M-1: M-2 shows the pattern consistently and lifts others via reviews.
+
+# Required output
+
+For EACH engineer, output this exact structure:
+
+## {login}
+**Assumed grade:** {Junior | Mid | Senior} — {one-sentence justification from the data, or "insufficient signal" if truly ambiguous}
+**Scores (on a 1–5 scale, relative to the assumed grade):**
+| Dimension | Score | Rationale (cite the numbers) |
+|---|---|---|
+| Delivery Throughput | X | ... |
+| PR Craftsmanship (size, type mix, files) | X | ... |
+| Code Durability (churn, merge rate) | X | ... |
+| Review Collaboration (comments, silent approvals) | X | ... |
+| Cycle Efficiency (merge time) | X | ... |
+| **Overall** | X | weighted narrative, not a mean |
+
+**Strengths:** 1–2 bullets, cite specific numbers.
+**Growth areas:** 1–2 bullets, cite specific numbers.
+**Data caveats:** anything missing, small sample, short tenure in window, etc.
+
+After all engineers, add:
+
+## Team-level observations
+- Review load distribution (who is carrying review volume, who is absent).
+- Churn hotspots (engineers whose work is most often reworked).
+- Any patterns suggesting process issues rather than individual performance.
+
+# Data
+
+Window: ${meta.since} → ${meta.until || 'now'} (${meta.weeks} weeks)
+Repos: ${meta.repos.join(', ')}
+Total PRs analyzed: ${meta.totalPRs}
+
+\`\`\`json
+${JSON.stringify(payload, null, 2)}
+\`\`\`
+
+Reminder: if the assumed grade is uncertain, say so and score conservatively. Never invent data. If a metric is null, treat it as "no signal" rather than "bad".`;
+}
+
+async function copyForAIReview() {
+  if (!currentData) return;
+  const btn = document.getElementById('copyAIBtn');
+  const original = btn.textContent;
+  try {
+    const text = buildAIReviewPrompt(currentData);
+    await navigator.clipboard.writeText(text);
+    btn.textContent = '✓ Copied';
+    setTimeout(() => { btn.textContent = original; }, 1800);
+  } catch (err) {
+    console.error('[EngTracker] copy failed:', err);
+    showError('Copy failed — clipboard permission denied. See console.');
+    btn.textContent = original;
   }
 }
 

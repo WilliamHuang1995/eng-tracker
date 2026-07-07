@@ -8,6 +8,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const FRONTEND = join(__dirname, '../frontend');
 const app = express();
 app.use(express.json());
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    console.log(`${req.method} ${req.url} → ${res.statusCode} (${Date.now() - start}ms)`);
+  });
+  next();
+});
 app.use(express.static(FRONTEND));
 
 function requireToken(req, res, next) {
@@ -168,7 +175,9 @@ app.get('/api/rate-limit', requireToken, async (req, res) => {
 
 app.get('/api/stats', requireToken, async (req, res) => {
   const { repos = '', weeks = '4', authors = '', team = '',
-          since: sinceParam = '', until: untilParam = '' } = req.query;
+          since: sinceParam = '', until: untilParam = '',
+          lite = '' } = req.query;
+  const liteMode = lite === '1' || lite === 'true';
 
   // Parse repos: comma-separated "owner/repo" pairs
   const repoList = repos.split(',')
@@ -267,81 +276,83 @@ app.get('/api/stats', requireToken, async (req, res) => {
       return userStats.get(login);
     };
 
-    for (const pr of allPRs) {
-      const author = pr.user?.login;
-      if (!author || author === 'ghost') continue;
+    // Process PRs in concurrent batches of 10 for speed
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < allPRs.length; i += BATCH_SIZE) {
+      const batch = allPRs.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (pr) => {
+        const author = pr.user?.login;
+        if (!author || author === 'ghost') return;
 
-      // Use the repo coords tagged onto this PR during fetch
-      const prOwner = pr._owner;
-      const prRepo  = pr._repo;
+        const prOwner = pr._owner;
+        const prRepo  = pr._repo;
 
-      const user = getUser(author, pr.user.avatar_url);
-      user.prsSubmitted++;
-      user.prsByType[categorizePR(pr)]++;
+        const user = getUser(author, pr.user.avatar_url);
+        user.prsSubmitted++;
+        user.prsByType[categorizePR(pr)]++;
 
-      const wk = getWeekStart(pr.created_at);
-      user.weeklyPRs[wk] = (user.weeklyPRs[wk] || 0) + 1;
+        const wk = getWeekStart(pr.created_at);
+        user.weeklyPRs[wk] = (user.weeklyPRs[wk] || 0) + 1;
 
-      if (pr.merged_at) {
-        const hours = (new Date(pr.merged_at) - new Date(pr.created_at)) / 3600000;
-        user.mergeTimes.push(parseFloat(hours.toFixed(2)));
-      }
-
-      // Fetch PR detail (size) + reviews + comments + file list in parallel
-      const [prDetail, reviews, reviewComments, issueComments, prFileList] = await Promise.all([
-        req.octokit.pulls.get({ owner: prOwner, repo: prRepo, pull_number: pr.number })
-          .then(r => r.data).catch(() => ({})),
-        req.octokit.pulls.listReviews({ owner: prOwner, repo: prRepo, pull_number: pr.number })
-          .then(r => r.data).catch(() => []),
-        req.octokit.pulls.listReviewComments({ owner: prOwner, repo: prRepo, pull_number: pr.number })
-          .then(r => r.data).catch(() => []),
-        req.octokit.issues.listComments({ owner: prOwner, repo: prRepo, issue_number: pr.number })
-          .then(r => r.data).catch(() => []),
-        req.octokit.pulls.listFiles({ owner: prOwner, repo: prRepo, pull_number: pr.number })
-          .then(r => r.data.map(f => f.filename)).catch(() => []),
-      ]);
-
-      // Accumulate code-size stats
-      user.totalAdditions    += prDetail.additions     || 0;
-      user.totalDeletions    += prDetail.deletions     || 0;
-      user.totalFilesChanged += prDetail.changed_files || 0;
-
-      // Record merged PR for cross-author churn detection (30-day window, computed after loop)
-      if (pr.merged_at) {
-        mergedPRsForChurn.push({
-          mergedAt: pr.merged_at,
-          author:   author.toLowerCase(),
-          files:    new Set(prFileList),
-        });
-      }
-
-      // Track who commented on this PR (excluding the PR author)
-      const commentersOnPR = new Set();
-
-      for (const comment of [...reviewComments, ...issueComments]) {
-        const commenter = comment.user?.login;
-        if (!commenter || commenter === author || commenter === 'ghost') continue;
-
-        const u = getUser(commenter, comment.user.avatar_url);
-        u.commentsOnOthers++;
-
-        const cwk = getWeekStart(comment.created_at);
-        u.weeklyComments[cwk] = (u.weeklyComments[cwk] || 0) + 1;
-        commentersOnPR.add(commenter);
-      }
-
-      // Process review approvals
-      for (const review of reviews) {
-        const reviewer = review.user?.login;
-        if (!reviewer || reviewer === author || reviewer === 'ghost') continue;
-        if (review.state !== 'APPROVED') continue;
-
-        const u = getUser(reviewer, review.user.avatar_url);
-        u.approvalsTotal++;
-        if (!commentersOnPR.has(reviewer)) {
-          u.approvalsWithoutComments++;
+        if (pr.merged_at) {
+          const hours = (new Date(pr.merged_at) - new Date(pr.created_at)) / 3600000;
+          user.mergeTimes.push(parseFloat(hours.toFixed(2)));
         }
-      }
+
+        // In lite mode, skip expensive per-PR API calls
+        if (liteMode) return;
+
+        const [prDetail, reviews, reviewComments, issueComments, prFileList] = await Promise.all([
+          req.octokit.pulls.get({ owner: prOwner, repo: prRepo, pull_number: pr.number })
+            .then(r => r.data).catch(() => ({})),
+          req.octokit.pulls.listReviews({ owner: prOwner, repo: prRepo, pull_number: pr.number })
+            .then(r => r.data).catch(() => []),
+          req.octokit.pulls.listReviewComments({ owner: prOwner, repo: prRepo, pull_number: pr.number })
+            .then(r => r.data).catch(() => []),
+          req.octokit.issues.listComments({ owner: prOwner, repo: prRepo, issue_number: pr.number })
+            .then(r => r.data).catch(() => []),
+          req.octokit.pulls.listFiles({ owner: prOwner, repo: prRepo, pull_number: pr.number })
+            .then(r => r.data.map(f => f.filename)).catch(() => []),
+        ]);
+
+        user.totalAdditions    += prDetail.additions     || 0;
+        user.totalDeletions    += prDetail.deletions     || 0;
+        user.totalFilesChanged += prDetail.changed_files || 0;
+
+        if (pr.merged_at) {
+          mergedPRsForChurn.push({
+            mergedAt: pr.merged_at,
+            author:   author.toLowerCase(),
+            files:    new Set(prFileList),
+          });
+        }
+
+        const commentersOnPR = new Set();
+
+        for (const comment of [...reviewComments, ...issueComments]) {
+          const commenter = comment.user?.login;
+          if (!commenter || commenter === author || commenter === 'ghost') continue;
+
+          const u = getUser(commenter, comment.user.avatar_url);
+          u.commentsOnOthers++;
+
+          const cwk = getWeekStart(comment.created_at);
+          u.weeklyComments[cwk] = (u.weeklyComments[cwk] || 0) + 1;
+          commentersOnPR.add(commenter);
+        }
+
+        for (const review of reviews) {
+          const reviewer = review.user?.login;
+          if (!reviewer || reviewer === author || reviewer === 'ghost') continue;
+          if (review.state !== 'APPROVED') continue;
+
+          const u = getUser(reviewer, review.user.avatar_url);
+          u.approvalsTotal++;
+          if (!commentersOnPR.has(reviewer)) {
+            u.approvalsWithoutComments++;
+          }
+        }
+      }));
     }
 
     // File-level churn pass: files authored by A reworked by another person within 30 days
@@ -397,6 +408,8 @@ app.get('/api/stats', requireToken, async (req, res) => {
         };
       }).sort((a, b) => b.prsSubmitted - a.prsSubmitted);
 
+    const filteredTotalPRs = stats.reduce((sum, u) => sum + u.prsSubmitted, 0);
+
     const result = {
       stats,
       meta: {
@@ -405,7 +418,7 @@ app.get('/api/stats', requireToken, async (req, res) => {
         weeks: weeksNum,
         since: sinceDate.toISOString(),
         until: untilDate.toISOString(),
-        totalPRs: allPRs.length,
+        totalPRs: filteredTotalPRs,
         resolvedTeam,
         authorFilter: authorFilter ? Array.from(authorFilter) : null,
         generatedAt: new Date().toISOString(),
@@ -419,6 +432,77 @@ app.get('/api/stats', requireToken, async (req, res) => {
   } catch (err) {
     console.error('Error:', err.message);
     res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+app.get('/api/comments', requireToken, async (req, res) => {
+  const { repos = '', author = '', since: sinceParam = '', until: untilParam = '', weeks = '4' } = req.query;
+
+  if (!author) return res.status(400).json({ error: 'author is required' });
+
+  const repoList = repos.split(',')
+    .map(r => r.trim()).filter(Boolean)
+    .map(r => { const [owner, repo] = r.split('/'); return { owner: owner?.trim(), repo: repo?.trim() }; })
+    .filter(r => r.owner && r.repo);
+
+  if (repoList.length === 0) return res.status(400).json({ error: 'At least one repo required' });
+
+  const untilDate = untilParam ? new Date(untilParam + 'T23:59:59.999Z') : new Date();
+  const sinceDate = sinceParam
+    ? new Date(sinceParam + 'T00:00:00.000Z')
+    : (() => { const d = new Date(untilDate); d.setDate(d.getDate() - parseInt(weeks) * 7); return d; })();
+
+  const authorLower = author.toLowerCase();
+
+  try {
+    const fetchResults = await Promise.allSettled(
+      repoList.map(({ owner, repo }) => fetchAllPRs(req.octokit, owner, repo, sinceDate, untilDate))
+    );
+
+    const allPRs = [];
+    fetchResults.forEach(result => {
+      if (result.status === 'fulfilled') allPRs.push(...result.value);
+    });
+
+    const comments = [];
+    const BATCH_SIZE = 10;
+
+    for (let i = 0; i < allPRs.length; i += BATCH_SIZE) {
+      const batch = allPRs.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (pr) => {
+        const prOwner = pr._owner;
+        const prRepo = pr._repo;
+
+        const [reviewComments, issueComments] = await Promise.all([
+          req.octokit.pulls.listReviewComments({ owner: prOwner, repo: prRepo, pull_number: pr.number })
+            .then(r => r.data).catch(() => []),
+          req.octokit.issues.listComments({ owner: prOwner, repo: prRepo, issue_number: pr.number })
+            .then(r => r.data).catch(() => []),
+        ]);
+
+        for (const comment of [...reviewComments, ...issueComments]) {
+          if (comment.user?.login?.toLowerCase() !== authorLower) continue;
+          comments.push({
+            pr: { number: pr.number, title: pr.title, author: pr.user?.login, repo: `${prOwner}/${prRepo}` },
+            body: comment.body,
+            createdAt: comment.created_at,
+            path: comment.path || null,
+          });
+        }
+      }));
+    }
+
+    comments.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    res.json({
+      author,
+      since: sinceDate.toISOString(),
+      until: untilDate.toISOString(),
+      totalComments: comments.length,
+      comments,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

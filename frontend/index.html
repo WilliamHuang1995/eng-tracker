@@ -456,6 +456,13 @@
       <button class="btn btn-primary" onclick="fetchStats()">Fetch</button>
     </div>
   </div>
+  <!-- Lite mode toggle -->
+  <div style="max-width:720px;margin-bottom:12px">
+    <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);cursor:pointer">
+      <input type="checkbox" id="liteMode" style="cursor:pointer" />
+      <span><strong style="color:var(--text)">Lite mode</strong> — skip per-PR detail calls (no code size, churn, or comments; uses ~20x fewer API calls)</span>
+    </label>
+  </div>
   <!-- Author filter: team OR manual list -->
   <div class="config-textarea">
     <div class="form-group">
@@ -523,6 +530,7 @@
               <th onclick="sortBy('weeklyCommentAvg')">Comments / Week</th>
               <th onclick="sortBy('approvalsTotal')">Approvals</th>
               <th onclick="sortBy('approvalsWithoutComments')">Silent Approvals ⓘ</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody id="tableBody"></tbody>
@@ -566,10 +574,16 @@
       </div>
     </div>
 
-    <!-- Weekly trend (full width) -->
+    <!-- Weekly PR trend (full width) -->
     <div class="chart-full">
-      <h3>Weekly PR Trend — Top contributors</h3>
+      <h3>Weekly PRs Created — All engineers</h3>
       <div class="chart-full-wrap"><canvas id="chartTrend"></canvas></div>
+    </div>
+
+    <!-- Weekly Comments trajectory (full width) -->
+    <div class="chart-full">
+      <h3>Weekly Review Comments — All engineers</h3>
+      <div class="chart-full-wrap"><canvas id="chartCommentsTrend"></canvas></div>
     </div>
   </div>
 </main>
@@ -786,6 +800,7 @@ async function fetchStats() {
       until: dateTo,
       ...(team    && { team }),
       ...(authors && !team && { authors }),
+      ...(document.getElementById('liteMode').checked && { lite: '1' }),
     });
     const res = await fetch(`/api/stats?${qs}`, {
       headers: { 'Authorization': `Bearer ${ghToken}` },
@@ -918,8 +933,12 @@ function exportSnapshot() {
       <div class="chart-card"><h3>Churn Score \u2014 % of authored files reworked by others within 30 days</h3><div class="chart-wrap"><canvas id="chartFiles"></canvas></div></div>
     </div>
     <div class="chart-full">
-      <h3>Weekly PR Trend \u2014 Top contributors</h3>
+      <h3>Weekly PRs Created \u2014 All engineers</h3>
       <div class="chart-full-wrap"><canvas id="chartTrend"></canvas></div>
+    </div>
+    <div class="chart-full">
+      <h3>Weekly Review Comments \u2014 All engineers</h3>
+      <div class="chart-full-wrap"><canvas id="chartCommentsTrend"></canvas></div>
     </div>
   </div>
 </main>
@@ -1104,6 +1123,66 @@ async function copyForAIReview() {
   }
 }
 
+async function copyComments(login) {
+  const ghToken = document.getElementById('ghToken').value.trim();
+  const repos = document.getElementById('repos').value
+    .split(/[\n,]+/).map(r => r.trim()).filter(Boolean).join(',');
+  const dateFrom = document.getElementById('dateFrom').value;
+  const dateTo = document.getElementById('dateTo').value;
+
+  if (!ghToken || !repos) { showError('Token and repos required'); return; }
+
+  const qs = new URLSearchParams({ repos, author: login, since: dateFrom, until: dateTo });
+
+  try {
+    showError(''); // clear
+    const el = event.target;
+    el.disabled = true;
+    el.textContent = '⏳';
+
+    const res = await fetch(`/api/comments?${qs}`, {
+      headers: { 'Authorization': `Bearer ${ghToken}` },
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    const prompt = `You are reviewing the code review comments left by engineer "${login}" on others' PRs.
+Analyze their review style, depth, and effectiveness. Consider:
+1. Are they giving substantive, actionable feedback or surface-level comments?
+2. Do they catch real bugs, suggest better patterns, or mostly nit on style?
+3. Is there a growth trend over time (improving quality/depth)?
+4. How constructive is the tone?
+
+Provide a structured assessment with:
+- **Review Style Summary** (2-3 sentences)
+- **Strengths** (cite specific comment examples)
+- **Growth Areas** (cite specific examples)
+- **Quality Score** (1-5, where 3 = meets expectations for their level)
+
+Window: ${data.since} → ${data.until}
+Total comments: ${data.totalComments}
+
+## Comments
+
+${data.comments.map(c =>
+  `### PR #${c.pr.number}: ${c.pr.title} (${c.pr.repo}, by @${c.pr.author})${c.path ? `\nFile: ${c.path}` : ''}
+Date: ${c.createdAt}
+
+${c.body}
+
+---`
+).join('\n\n')}`;
+
+    await navigator.clipboard.writeText(prompt);
+    el.textContent = '✓';
+    setTimeout(() => { el.disabled = false; el.textContent = '📋 Comments'; }, 1800);
+  } catch (err) {
+    showError(`Failed to fetch comments for ${login}: ${err.message}`);
+    event.target.disabled = false;
+    event.target.textContent = '📋 Comments';
+  }
+}
+
 // ─────────────────────────────────────────────
 //  Render Dashboard
 // ─────────────────────────────────────────────
@@ -1213,6 +1292,7 @@ function renderTable(stats) {
       <td>${commentBadge(u.weeklyCommentAvg)}</td>
       <td>${u.approvalsTotal > 0 ? u.approvalsTotal : '<span class="na">—</span>'}</td>
       <td>${silentHtml(u.approvalsTotal, u.approvalsWithoutComments)}</td>
+      <td><button class="btn" style="font-size:11px;padding:3px 8px" onclick="copyComments('${u.login}')">📋 Comments</button></td>
     </tr>
   `).join('');
 
@@ -1422,12 +1502,9 @@ function renderCharts(stats, meta) {
     options: barOptions({ tooltipFn: ctx => `${ctx.raw}%` }),
   });
 
-  // 7. Weekly PR Trend (line) — top 6 contributors by total PRs
-  const topN = [...stats].sort((a,b) => b.prsSubmitted - a.prsSubmitted).slice(0, 6);
-
-  // Collect all week labels across all users, sorted
+  // 7. Weekly PR Trend (line) — all engineers
   const allWeeks = Array.from(
-    new Set(topN.flatMap(u => Object.keys(u.weeklyPRs)))
+    new Set(stats.flatMap(u => Object.keys(u.weeklyPRs)))
   ).sort();
 
   charts.trend = new Chart(document.getElementById('chartTrend'), {
@@ -1437,9 +1514,52 @@ function renderCharts(stats, meta) {
         const d = new Date(w);
         return d.toLocaleDateString('en-US', { month:'short', day:'numeric' });
       }),
-      datasets: topN.map((u, i) => ({
+      datasets: stats.map((u, i) => ({
         label: u.login,
         data: allWeeks.map(w => u.weeklyPRs[w] || 0),
+        borderColor: PALETTE[i % PALETTE.length],
+        backgroundColor: PALETTE[i % PALETTE.length] + '22',
+        borderWidth: 2,
+        pointRadius: 4,
+        tension: 0.3,
+        fill: false,
+      })),
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          display: true,
+          labels: { color: '#8b949e', font: { size: 12 }, boxWidth: 12 },
+        },
+      },
+      scales: {
+        x: { grid: { color: '#30363d' }, ticks: { color: '#8b949e' } },
+        y: {
+          grid: { color: '#30363d' },
+          ticks: { color: '#8b949e', stepSize: 1 },
+          min: 0,
+        },
+      },
+    },
+  });
+
+  // 8. Weekly Comments Trajectory (line) — all engineers
+  const allCommentWeeks = Array.from(
+    new Set(stats.flatMap(u => Object.keys(u.weeklyComments || {})))
+  ).sort();
+
+  charts.commentsTrend = new Chart(document.getElementById('chartCommentsTrend'), {
+    type: 'line',
+    data: {
+      labels: allCommentWeeks.map(w => {
+        const d = new Date(w);
+        return d.toLocaleDateString('en-US', { month:'short', day:'numeric' });
+      }),
+      datasets: stats.map((u, i) => ({
+        label: u.login,
+        data: allCommentWeeks.map(w => (u.weeklyComments || {})[w] || 0),
         borderColor: PALETTE[i % PALETTE.length],
         backgroundColor: PALETTE[i % PALETTE.length] + '22',
         borderWidth: 2,

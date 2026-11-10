@@ -402,7 +402,7 @@
   <div class="header-right">
     <span id="rateLimit" style="display:none;"></span>
     <span id="lastUpdated"></span>
-    <button class="btn" onclick="toggleConfig()">⚙ Config</button>
+    <button class="btn" onclick="toggleSync()">⟳ Sync</button>
     <button class="btn" id="exportBtn" onclick="exportSnapshot()" style="display:none"
       title="Download a self-contained HTML snapshot of this report">⬇ Export</button>
     <button class="btn" id="copyAIBtn" onclick="copyForAIReview()" style="display:none"
@@ -411,28 +411,44 @@
   </div>
 </header>
 
-<!-- ── CONFIG PANEL ──────────────────────────── -->
-<section id="configPanel">
-  <!-- GitHub Token -->
+<!-- ── SYNC PANEL (admin — pull from GitHub into DB) ────────── -->
+<section id="syncPanel" style="display:none;background:var(--surface);border-bottom:1px solid var(--border);padding:16px 24px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+    <h3 style="font-size:13px;font-weight:600;color:var(--text)">Sync from GitHub → Database</h3>
+    <button class="btn" onclick="toggleSync()" style="font-size:11px;padding:2px 8px">✕ Close</button>
+  </div>
   <div class="config-textarea">
     <div class="form-group">
-      <label>GitHub Personal Access Token</label>
-      <input type="password" id="ghToken" placeholder="github_pat_..." style="width:100%;padding:7px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;font-family:inherit;" />
-      <p style="margin-top:6px;font-size:12px;color:var(--muted)">
-        Your token stays in your browser and is never stored on our end.
-        <a href="https://github.com/settings/tokens/new?description=eng-tracker&scopes=repo,read:org" target="_blank" rel="noopener" style="color:var(--accent)">Generate one on GitHub →</a>
+      <label>GitHub Token</label>
+      <input type="password" id="syncToken" placeholder="github_pat_..." style="width:100%;padding:7px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;font-family:inherit;" />
+      <p style="margin-top:6px;font-size:11px;color:var(--muted)">
+        <a href="https://github.com/settings/tokens/new?description=eng-tracker&scopes=repo,read:org" target="_blank" rel="noopener" style="color:var(--accent)">Generate a token on GitHub →</a>
       </p>
     </div>
   </div>
-  <!-- Repos textarea -->
   <div class="config-textarea">
     <div class="form-group">
-      <label>Repositories <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(one <code style="background:var(--surface2);padding:1px 5px;border-radius:3px">owner/repo</code> per line)</span></label>
-      <textarea id="repos" rows="3" placeholder="my-org/backend&#10;my-org/frontend&#10;my-org/infra"></textarea>
+      <label>Repositories to sync <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(one <code style="background:var(--surface2);padding:1px 5px;border-radius:3px">owner/repo</code> per line)</span></label>
+      <textarea id="syncRepos" rows="3" placeholder="my-org/backend&#10;my-org/frontend&#10;my-org/infra"></textarea>
     </div>
   </div>
-  <!-- Date range + fetch -->
-  <div class="config-grid">
+  <div style="display:flex;gap:12px;align-items:end;max-width:500px">
+    <div class="form-group" style="flex:1">
+      <label>From</label>
+      <input type="date" id="syncFrom" />
+    </div>
+    <div class="form-group" style="flex:1">
+      <label>To</label>
+      <input type="date" id="syncTo" />
+    </div>
+    <button class="btn btn-primary" id="syncBtn" onclick="syncData()">Sync</button>
+  </div>
+  <p style="margin-top:8px;font-size:11px;color:var(--muted)">Pulls PR data from GitHub and stores it locally. Only needs to run once per date range. Skips months already synced.</p>
+</section>
+
+<!-- ── QUERY PANEL (main — filter what's in DB) ────────────── -->
+<section id="queryPanel" style="background:var(--surface);border-bottom:1px solid var(--border);padding:16px 24px;">
+  <div style="display:grid;grid-template-columns:1fr 1fr auto auto;gap:12px;align-items:end;max-width:720px;margin-bottom:12px">
     <div class="form-group">
       <label>From</label>
       <input type="date" id="dateFrom" onchange="document.getElementById('quickRange').value=''" />
@@ -450,30 +466,26 @@
         <option value="4" selected>Last 4 weeks</option>
         <option value="8">Last 8 weeks</option>
         <option value="12">Last 12 weeks</option>
+        <option value="26">Last 6 months</option>
       </select>
     </div>
     <div style="align-self:end">
       <button class="btn btn-primary" onclick="fetchStats()">Fetch</button>
     </div>
   </div>
-  <!-- Lite mode toggle -->
   <div style="max-width:720px;margin-bottom:12px">
-    <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);cursor:pointer">
-      <input type="checkbox" id="liteMode" style="cursor:pointer" />
-      <span><strong style="color:var(--text)">Lite mode</strong> — skip per-PR detail calls (no code size, churn, or comments; uses ~20x fewer API calls)</span>
-    </label>
-  </div>
-  <!-- Author filter: team OR manual list -->
-  <div class="config-textarea">
-    <div class="form-group">
-      <label>GitHub Team <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(org/team-slug — resolved automatically)</span></label>
-      <input type="text" id="team" placeholder="my-org/my-team" style="width:100%;padding:7px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;font-family:inherit;" />
+    <div class="form-group" style="display:flex;gap:12px;align-items:end">
+      <div style="flex:1">
+        <label>GitHub Team <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(org/team-slug — auto-fills authors)</span></label>
+        <input type="text" id="team" placeholder="my-org/my-team" style="width:100%;padding:7px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;font-family:inherit;" />
+      </div>
+      <button class="btn" onclick="resolveTeam()" style="white-space:nowrap">Resolve</button>
     </div>
   </div>
-  <div class="authors-row" id="manualAuthorsRow">
+  <div style="max-width:720px">
     <div class="form-group">
-      <label>Or manually filter authors <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(comma-separated — ignored when Team is set)</span></label>
-      <textarea id="authors" rows="2" placeholder="alice, bob, charlie"></textarea>
+      <label>Filter authors <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(comma-separated GitHub logins — leave blank for all)</span></label>
+      <textarea id="authors" rows="2" placeholder="alice, bob, charlie" style="width:100%;padding:7px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;font-family:'SF Mono','Fira Mono',monospace;resize:vertical;line-height:1.6;"></textarea>
     </div>
   </div>
 </section>
@@ -605,38 +617,44 @@ const charts = {};
   if (saved) {
     try {
       const c = JSON.parse(saved);
-      // Clear stale data from old single-repo format (had owner/repo instead of repos)
-      if (!c.repos) {
-        localStorage.removeItem('engTracker');
-        toggleConfig();
-        return;
-      }
-      document.getElementById('ghToken').value     = c.ghToken    || '';
-      document.getElementById('repos').value      = c.repos      || '';
       document.getElementById('dateFrom').value   = c.dateFrom   || '';
       document.getElementById('dateTo').value     = c.dateTo     || '';
-      // Fall back to old 'weeks' key for backwards compatibility
-      document.getElementById('quickRange').value = c.quickRange || c.weeks || '4';
-      document.getElementById('team').value       = c.team       || '';
+      document.getElementById('quickRange').value = c.quickRange || '4';
       document.getElementById('authors').value    = c.authors    || '';
-      // If no explicit dates saved, fill them from the quick range
       if (!c.dateFrom) applyQuickRange();
-      // Still open config if repos textarea ended up empty somehow
-      if (!c.repos.trim()) toggleConfig();
     } catch (_) {
       localStorage.removeItem('engTracker');
-      toggleConfig();
+      applyQuickRange();
     }
   } else {
-    toggleConfig();
+    applyQuickRange();
   }
 })();
 
 // ─────────────────────────────────────────────
 //  Helpers
 // ─────────────────────────────────────────────
-function toggleConfig() {
-  document.getElementById('configPanel').classList.toggle('open');
+function toggleSync() {
+  const el = document.getElementById('syncPanel');
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+async function resolveTeam() {
+  const team = document.getElementById('team').value.trim();
+  const token = document.getElementById('syncToken').value.trim();
+  if (!team) { showError('Enter a team slug (org/team-name)'); return; }
+  if (!token) { showError('Enter your GitHub token in the Sync panel first'); toggleSync(); return; }
+
+  try {
+    const res = await fetch(`/api/resolve-team?team=${encodeURIComponent(team)}`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    document.getElementById('authors').value = data.members.join(', ');
+  } catch (err) {
+    showError(`Failed to resolve team: ${err.message}`);
+  }
 }
 
 function showError(msg) {
@@ -742,16 +760,62 @@ const PALETTE = [
 // ─────────────────────────────────────────────
 //  Fetch
 // ─────────────────────────────────────────────
-async function fetchStats() {
-  const ghToken = document.getElementById('ghToken').value.trim();
-  const repos   = document.getElementById('repos').value
+async function syncData() {
+  const ghToken = document.getElementById('syncToken').value.trim();
+  const repos = document.getElementById('syncRepos').value
     .split(/[\n,]+/).map(r => r.trim()).filter(Boolean).join(',');
-  const team    = document.getElementById('team').value.trim();
+  const dateFrom = document.getElementById('syncFrom').value;
+  const dateTo = document.getElementById('syncTo').value;
+
+  if (!ghToken) { showError('Token required for sync'); return; }
+  if (!repos) { showError('Repos required for sync'); return; }
+  if (!dateFrom || !dateTo) { showError('Date range required for sync'); return; }
+
+  const btn = document.getElementById('syncBtn');
+  btn.disabled = true;
+  btn.textContent = 'Syncing…';
+  document.getElementById('loading').style.display = 'block';
+  document.getElementById('dashboard').style.display = 'none';
+  document.getElementById('emptyState').style.display = 'none';
+
+  try {
+    const res = await fetch('/api/sync', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${ghToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ repos, since: dateFrom, until: dateTo }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    const totalPRs = data.results.reduce((s, r) => s + r.prs, 0);
+    const failed = data.results.filter(r => r.status === 'error');
+    let msg = `Synced ${totalPRs} PRs to database.`;
+    if (failed.length) msg += ` (${failed.length} repo(s) partially failed)`;
+    alert(msg);
+
+    document.getElementById('loading').style.display = 'none';
+    // Auto-set query dates to match sync range
+    document.getElementById('dateFrom').value = dateFrom;
+    document.getElementById('dateTo').value = dateTo;
+    document.getElementById('quickRange').value = '';
+    await fetchStats();
+  } catch (err) {
+    showError(`Sync failed: ${err.message}`);
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('emptyState').style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sync';
+  }
+}
+
+async function fetchStats() {
   const authors = document.getElementById('authors').value
     .split(/[\n,]+/).map(a => a.trim()).filter(Boolean).join(',');
-  const quickRange = document.getElementById('quickRange').value;
 
-  // If either date is blank, fill both from the quick-range preset
   let dateFrom = document.getElementById('dateFrom').value;
   let dateTo   = document.getElementById('dateTo').value;
   if (!dateFrom || !dateTo) {
@@ -760,29 +824,9 @@ async function fetchStats() {
     dateTo   = document.getElementById('dateTo').value;
   }
 
-  console.log('[EngTracker] fetchStats →', { repos, dateFrom, dateTo, authors });
+  console.log('[EngTracker] fetchStats →', { dateFrom, dateTo, authors });
 
-  if (!ghToken) {
-    showError('Please enter your GitHub personal access token.');
-    document.getElementById('configPanel').classList.add('open');
-    return;
-  }
-
-  if (!repos) {
-    showError('Please enter at least one repository in the format owner/repo.');
-    document.getElementById('configPanel').classList.add('open');
-    return;
-  }
-
-  // Validate each entry looks like owner/repo
-  const invalid = repos.split(',').filter(r => !r.includes('/') || r.split('/').length !== 2);
-  if (invalid.length) {
-    showError(`Invalid repo format: "${invalid[0]}" — use owner/repo (e.g. my-org/backend)`);
-    document.getElementById('configPanel').classList.add('open');
-    return;
-  }
-
-  localStorage.setItem('engTracker', JSON.stringify({ ghToken, repos, dateFrom, dateTo, quickRange, team, authors }));
+  localStorage.setItem('engTracker', JSON.stringify({ dateFrom, dateTo, quickRange: document.getElementById('quickRange').value, authors }));
 
   const btn = document.getElementById('fetchBtn');
   btn.disabled = true;
@@ -795,16 +839,11 @@ async function fetchStats() {
 
   try {
     const qs = new URLSearchParams({
-      repos,
       since: dateFrom,
       until: dateTo,
-      ...(team    && { team }),
-      ...(authors && !team && { authors }),
-      ...(document.getElementById('liteMode').checked && { lite: '1' }),
+      ...(authors && { authors }),
     });
-    const res = await fetch(`/api/stats?${qs}`, {
-      headers: { 'Authorization': `Bearer ${ghToken}` },
-    });
+    const res = await fetch(`/api/stats?${qs}`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `Server error ${res.status}`);
 
@@ -817,8 +856,6 @@ async function fetchStats() {
     document.getElementById('dashboard').style.display = 'block';
     document.getElementById('lastUpdated').textContent =
       `Updated ${new Date().toLocaleTimeString()}`;
-
-    fetchRateLimit();
 
   } catch (err) {
     console.error('[EngTracker] fetch error:', err);
@@ -837,7 +874,7 @@ async function fetchStats() {
 
 async function fetchRateLimit() {
   try {
-    const token = document.getElementById('ghToken').value.trim();
+    const token = document.getElementById('syncToken').value.trim();
     const res = await fetch('/api/rate-limit', {
       headers: { 'Authorization': `Bearer ${token}` },
     });
@@ -852,15 +889,57 @@ async function fetchRateLimit() {
 // ─────────────────────────────────────────────
 //  Export Snapshot
 // ─────────────────────────────────────────────
-function exportSnapshot() {
-  if (!currentData) return;
+async function exportSnapshot() {
+  console.log('[EngTracker] exportSnapshot() called');
+  if (!currentData) {
+    console.warn('[EngTracker] Export aborted: currentData is', currentData, '— fetch a report first.');
+    return;
+  }
+  console.log('[EngTracker] currentData has', currentData.stats?.length, 'engineers');
+
+  // Export snapshots the report already in currentData, so it reads the range,
+  // repos and author filter from the fetched data — NOT from the Sync panel.
+  const meta = currentData.meta || {};
+  const repos = Array.isArray(meta.repos) ? meta.repos.join(',') : '';
+  const dateFrom = (meta.since || '').slice(0, 10);
+  const dateTo = (meta.until || '').slice(0, 10);
+
+  // The token is only needed to enrich the snapshot with PR comments (for the
+  // AI-review feature). It is optional — without it we still export the report,
+  // just without the embedded comments.
+  const ghToken = document.getElementById('syncToken').value.trim();
+  console.log('[EngTracker] token present:', !!ghToken, '| range', dateFrom, '→', dateTo);
+
+  // Fetch comments for all engineers (only if a token is available)
+  const allComments = {};
+  if (ghToken) {
+    for (const eng of currentData.stats) {
+      try {
+        const qs = new URLSearchParams({ repos, author: eng.login, since: dateFrom, until: dateTo });
+        const res = await fetch(`/api/comments?${qs}`, {
+          headers: { 'Authorization': `Bearer ${ghToken}` },
+        });
+        console.log(`[EngTracker] /api/comments ${eng.login} → ${res.status}`);
+        const data = await res.json();
+        if (res.ok) allComments[eng.login] = data;
+      } catch (err) {
+        console.warn(`[EngTracker] /api/comments ${eng.login} threw:`, err);
+      }
+    }
+  } else {
+    console.log('[EngTracker] no token — exporting report without embedded comments');
+  }
+  console.log('[EngTracker] comment fetch done; engineers with comments:', Object.keys(allComments).length);
 
   const css = document.querySelector('style').textContent;
   const dt  = new Date(currentData.meta.generatedAt);
   const filename = `eng-tracker-${dt.toISOString().slice(0, 10)}.html`;
+  console.log('[EngTracker] building snapshot HTML, filename:', filename);
 
   // Escape end-script tags inside the JSON so the browser doesn't close this block early
   const snapshotJson = JSON.stringify(currentData)
+    .replace(/<\/script>/gi, '<\\/script>');
+  const commentsJson = JSON.stringify(allComments)
     .replace(/<\/script>/gi, '<\\/script>');
 
   const html = `<!DOCTYPE html>
@@ -946,6 +1025,7 @@ function exportSnapshot() {
 <script>
 // ── Snapshot data ──────────────────────────────────────────────
 const SNAPSHOT  = ${snapshotJson};
+const SNAPSHOT_COMMENTS = ${commentsJson};
 let currentData = SNAPSHOT;
 let sortKey     = 'prsSubmitted';
 let sortDir     = 'desc';
@@ -974,6 +1054,32 @@ ${destroyCharts.toString()}
 ${barOptions.toString()}
 ${renderCharts.toString()}
 
+// ── Comments (from embedded data) ────────────────────────────
+async function copyComments(login) {
+  const data = SNAPSHOT_COMMENTS[login];
+  if (!data || !data.comments.length) {
+    alert('No comments found for ' + login);
+    return;
+  }
+  const btn = document.querySelector("button[data-login='" + login + "']");
+  btn.disabled = true;
+  btn.textContent = '⏳';
+
+  const prompt = 'You are analyzing GitHub PR comments by engineer "' + login + '" to produce a **review style profile** — a reference document capturing how this person operates in code review.\\n\\nPURPOSE: This will be used for performance calibration / promo evidence / team onboarding. Weight your emphasis accordingly.\\n\\nDATA NOTES:\\n- The dataset contains BOTH (a) review comments on teammates\\' PRs and (b) author replies on their own PRs. Analyze both, but keep them distinct — (a) shows how they review, (b) shows how they receive feedback and manage scope.\\n- Comments shown may be a sample of the full set. Don\\'t extrapolate counts beyond what\\'s visible.\\n\\nGenerate a profile with these sections:\\n\\n### Voice & Tone\\nDirect/diplomatic/questioning? Humor, emoji, formality? How criticism vs praise is delivered? How do they escalate when something actually matters vs. a preference?\\n\\n### What They Focus On\\nRecurring themes (correctness, naming, tests, logging, process, security...). For the top 3, give a rough frequency signal (e.g., "appears in 20+ comments across 8 authors"). Also note what they explicitly deprioritize or defer.\\n\\n### Depth & Engagement\\nDeep dives vs surface scans (and on what kinds of files)? Questions vs conclusions? Do they propose alternatives, cite specs/docs/prior art, verify claims themselves?\\n\\n### As a PR Author (feedback reception)\\nHow do they respond to pushback — concede, defend with evidence, defer to follow-ups? Do deferred items get tickets/links?\\n\\n### Signature Patterns\\nRecurring openers, phrases, closers, approval conditions. Quote the exact phrasings.\\n\\n### Growth Over Time\\nOnly note shifts with clear evidence across the window; state confidence and flag if comment density is uneven across months.\\n\\n### Example Comments (4-6, quoted verbatim with PR# and date)\\nOne best-case, one typical, one signature-pattern, one direct/enforcing.\\n\\n### How to Work With This Reviewer\\n5-6 practical sentences for a new teammate: what to do before requesting review, what will block vs what won\\'t.\\n\\nRULES:\\n- Evidence-based only. Describe observable behavior; do NOT infer personality, motivation, or psychological traits.\\n- Every claim in sections 1-6 should be traceable to a quoted or cited comment.\\n- Use the same section structure for every engineer profiled so outputs are comparable.\\n- Length: ~1,200-1,800 words. Deliver as a markdown file.\\n\\n---\\n\\nWindow: ' + data.since + ' → ' + data.until + '\\nTotal comments: ' + data.totalComments + '\\n\\n## Comments\\n\\n' + data.comments.map(function(c) {
+    return '### PR #' + c.pr.number + ': ' + c.pr.title + ' (' + c.pr.repo + ', by @' + c.pr.author + ')' + (c.path ? '\\nFile: ' + c.path : '') + '\\nDate: ' + c.createdAt + '\\n\\n' + c.body + '\\n\\n---';
+  }).join('\\n\\n');
+
+  try {
+    await navigator.clipboard.writeText(prompt);
+    btn.textContent = '✓';
+    setTimeout(function() { btn.disabled = false; btn.textContent = '📋 Comments'; }, 1800);
+  } catch(e) {
+    alert('Clipboard failed: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = '📋 Comments';
+  }
+}
+
 // ── Boot ───────────────────────────────────────────────────────
 renderDashboard(SNAPSHOT);
 <\/script>
@@ -981,6 +1087,7 @@ renderDashboard(SNAPSHOT);
 </html>`;
 
   try {
+    console.log('[EngTracker] HTML built, length:', html.length, '— triggering download');
     const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
@@ -1124,40 +1231,64 @@ async function copyForAIReview() {
 }
 
 async function copyComments(login) {
-  const ghToken = document.getElementById('ghToken').value.trim();
-  const repos = document.getElementById('repos').value
-    .split(/[\n,]+/).map(r => r.trim()).filter(Boolean).join(',');
+  const repos = '';
   const dateFrom = document.getElementById('dateFrom').value;
   const dateTo = document.getElementById('dateTo').value;
 
-  if (!ghToken || !repos) { showError('Token and repos required'); return; }
-
   const qs = new URLSearchParams({ repos, author: login, since: dateFrom, until: dateTo });
 
-  try {
-    showError(''); // clear
-    const el = event.target;
-    el.disabled = true;
-    el.textContent = '⏳';
+  const btn = document.querySelector("button[data-login='" + login + "']");
 
-    const res = await fetch(`/api/comments?${qs}`, {
-      headers: { 'Authorization': `Bearer ${ghToken}` },
-    });
+  try {
+    document.getElementById('errorBanner').style.display = 'none';
+    btn.disabled = true;
+    btn.textContent = '⏳';
+
+    const res = await fetch(`/api/comments?${qs}`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
 
-    const prompt = `You are reviewing the code review comments left by engineer "${login}" on others' PRs.
-Analyze their review style, depth, and effectiveness. Consider:
-1. Are they giving substantive, actionable feedback or surface-level comments?
-2. Do they catch real bugs, suggest better patterns, or mostly nit on style?
-3. Is there a growth trend over time (improving quality/depth)?
-4. How constructive is the tone?
+    const prompt = `You are analyzing GitHub PR comments by engineer "${login}" to produce a **review style profile** — a reference document capturing how this person operates in code review.
 
-Provide a structured assessment with:
-- **Review Style Summary** (2-3 sentences)
-- **Strengths** (cite specific comment examples)
-- **Growth Areas** (cite specific examples)
-- **Quality Score** (1-5, where 3 = meets expectations for their level)
+PURPOSE: This will be used for performance calibration / promo evidence / team onboarding. Weight your emphasis accordingly.
+
+DATA NOTES:
+- The dataset contains BOTH (a) review comments on teammates' PRs and (b) author replies on their own PRs. Analyze both, but keep them distinct — (a) shows how they review, (b) shows how they receive feedback and manage scope.
+- Comments shown may be a sample of the full set. Don't extrapolate counts beyond what's visible.
+
+Generate a profile with these sections:
+
+### Voice & Tone
+Direct/diplomatic/questioning? Humor, emoji, formality? How criticism vs praise is delivered? How do they escalate when something actually matters vs. a preference?
+
+### What They Focus On
+Recurring themes (correctness, naming, tests, logging, process, security...). For the top 3, give a rough frequency signal (e.g., "appears in 20+ comments across 8 authors"). Also note what they explicitly deprioritize or defer.
+
+### Depth & Engagement
+Deep dives vs surface scans (and on what kinds of files)? Questions vs conclusions? Do they propose alternatives, cite specs/docs/prior art, verify claims themselves?
+
+### As a PR Author (feedback reception)
+How do they respond to pushback — concede, defend with evidence, defer to follow-ups? Do deferred items get tickets/links?
+
+### Signature Patterns
+Recurring openers, phrases, closers, approval conditions. Quote the exact phrasings.
+
+### Growth Over Time
+Only note shifts with clear evidence across the window; state confidence and flag if comment density is uneven across months.
+
+### Example Comments (4-6, quoted verbatim with PR# and date)
+One best-case, one typical, one signature-pattern, one direct/enforcing.
+
+### How to Work With This Reviewer
+5-6 practical sentences for a new teammate: what to do before requesting review, what will block vs what won't.
+
+RULES:
+- Evidence-based only. Describe observable behavior; do NOT infer personality, motivation, or psychological traits.
+- Every claim in sections 1-6 should be traceable to a quoted or cited comment.
+- Use the same section structure for every engineer profiled so outputs are comparable.
+- Length: ~1,200-1,800 words. Deliver as a markdown file.
+
+---
 
 Window: ${data.since} → ${data.until}
 Total comments: ${data.totalComments}
@@ -1174,12 +1305,12 @@ ${c.body}
 ).join('\n\n')}`;
 
     await navigator.clipboard.writeText(prompt);
-    el.textContent = '✓';
-    setTimeout(() => { el.disabled = false; el.textContent = '📋 Comments'; }, 1800);
+    btn.textContent = '✓';
+    setTimeout(() => { btn.disabled = false; btn.textContent = '📋 Comments'; }, 1800);
   } catch (err) {
     showError(`Failed to fetch comments for ${login}: ${err.message}`);
-    event.target.disabled = false;
-    event.target.textContent = '📋 Comments';
+    btn.disabled = false;
+    btn.textContent = '📋 Comments';
   }
 }
 
@@ -1292,7 +1423,7 @@ function renderTable(stats) {
       <td>${commentBadge(u.weeklyCommentAvg)}</td>
       <td>${u.approvalsTotal > 0 ? u.approvalsTotal : '<span class="na">—</span>'}</td>
       <td>${silentHtml(u.approvalsTotal, u.approvalsWithoutComments)}</td>
-      <td><button class="btn" style="font-size:11px;padding:3px 8px" onclick="copyComments('${u.login}')">📋 Comments</button></td>
+      <td><button class="btn" style="font-size:11px;padding:3px 8px" data-login="${u.login}" onclick="copyComments('${u.login}')">📋 Comments</button></td>
     </tr>
   `).join('');
 
